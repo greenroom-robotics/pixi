@@ -8,9 +8,12 @@
 //! and backwards compatibility. The idea for **backwards compatibility** is
 //! that we try not to break this in pixi as much as possible. So as long as
 //! older pixi TOMLs keep loading, we can send them to the backend.
+use crate::ExtraGroupName;
 use ordermap::OrderMap;
 use pixi_stable_hash::{IsDefault, StableHashBuilder};
-use rattler_conda_types::{BuildNumber, BuildNumberSpec, StringMatcher, Version, VersionSpec};
+use rattler_conda_types::{
+    BuildNumber, BuildNumberSpec, Flag, MatchSpecCondition, StringMatcher, Version, VersionSpec,
+};
 use rattler_digest::{Md5, Md5Hash, Sha256, Sha256Hash, serde::SerializableHash};
 use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, DisplayFromStr, SerializeDisplay, serde_as};
@@ -40,6 +43,11 @@ pub struct ProjectModel {
 
     /// An optional project description
     pub description: Option<String>,
+
+    /// V3 package variant flags declared by the source package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<Vec<String>>"))]
+    pub build_flags: Option<Vec<Flag>>,
 
     /// Optional authors
     pub authors: Option<Vec<String>>,
@@ -93,6 +101,7 @@ pub enum TargetSelector {
     Linux,
     Win,
     MacOs,
+    Subdir(String),
     Platform(String),
     // TODO: Add minijinja coolness here.
 }
@@ -104,6 +113,7 @@ impl Display for TargetSelector {
             TargetSelector::Linux => write!(f, "linux"),
             TargetSelector::Win => write!(f, "win"),
             TargetSelector::MacOs => write!(f, "macos"),
+            TargetSelector::Subdir(s) => write!(f, "{s}"),
             TargetSelector::Platform(p) => write!(f, "{p}"),
         }
     }
@@ -116,8 +126,16 @@ impl FromStr for TargetSelector {
             "unix" => Ok(TargetSelector::Unix),
             "linux" => Ok(TargetSelector::Linux),
             "win" => Ok(TargetSelector::Win),
-            "macos" => Ok(TargetSelector::MacOs),
-            _ => Ok(TargetSelector::Platform(s.to_string())),
+            // `macos` (wire form) and `osx` (conda subdir family).
+            "macos" | "osx" => Ok(TargetSelector::MacOs),
+            other => {
+                let other = other.to_string();
+                if rattler_conda_types::Platform::from_str(&other).is_ok() {
+                    Ok(TargetSelector::Subdir(other))
+                } else {
+                    Ok(TargetSelector::Platform(s.to_string()))
+                }
+            }
         }
     }
 }
@@ -189,6 +207,17 @@ pub struct Target {
         schemars(with = "Option<std::collections::HashMap<String, PackageSpec>>")
     )]
     pub run_constraints: Option<OrderMap<SourcePackageName, PackageSpec>>,
+
+    /// Extra groups declared by the source package for this target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(
+            with = "Option<std::collections::HashMap<String, std::collections::HashMap<String, PackageSpec>>>"
+        )
+    )]
+    pub extra_dependencies:
+        Option<OrderMap<ExtraGroupName, OrderMap<SourcePackageName, PackageSpec>>>,
 }
 
 impl Target {
@@ -202,8 +231,16 @@ impl Target {
         let has_no_host_deps = self.host_dependencies.as_ref().is_none_or(|d| d.is_empty());
         let has_no_run_deps = self.run_dependencies.as_ref().is_none_or(|d| d.is_empty());
         let has_no_run_constraints = self.run_constraints.as_ref().is_none_or(|d| d.is_empty());
+        let has_no_extra_dependencies = self
+            .extra_dependencies
+            .as_ref()
+            .is_none_or(|e| e.is_empty() || e.values().all(|deps| deps.is_empty()));
 
-        has_no_build_deps && has_no_host_deps && has_no_run_deps && has_no_run_constraints
+        has_no_build_deps
+            && has_no_host_deps
+            && has_no_run_deps
+            && has_no_run_constraints
+            && has_no_extra_dependencies
     }
 }
 
@@ -220,11 +257,23 @@ impl IsDefault for Target {
 #[serde(rename_all = "camelCase")]
 pub enum PackageSpec {
     /// This is a binary dependency
-    Binary(BinaryPackageSpec),
+    Binary(Box<BinaryPackageSpec>),
     /// This is a dependency on a source package
     Source(SourcePackageSpec),
     /// Pin to a version that is compatible with a version from the "previous" environment
     PinCompatible(PinCompatibleSpec),
+}
+
+impl From<BinaryPackageSpec> for PackageSpec {
+    fn from(value: BinaryPackageSpec) -> Self {
+        PackageSpec::Binary(Box::new(value))
+    }
+}
+
+impl From<VersionSpec> for PackageSpec {
+    fn from(value: VersionSpec) -> Self {
+        PackageSpec::Binary(Box::new(value.into()))
+    }
 }
 
 /// A package spec that can be used for constraints.
@@ -469,6 +518,12 @@ pub struct BinaryPackageSpec {
     pub build_number: Option<BuildNumberSpec>,
     /// Match the specific filename of the package
     pub file_name: Option<String>,
+    /// Optional extra dependencies to select for the package.
+    pub extras: Option<Vec<String>>,
+    /// Plain string flags used to select package variants.
+    #[serde_as(as = "Option<Vec<DisplayFromStr>>")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<Vec<String>>"))]
+    pub flags: Option<Vec<StringMatcher>>,
     /// The channel of the package
     pub channel: Option<Url>,
     /// The subdir of the channel
@@ -485,6 +540,9 @@ pub struct BinaryPackageSpec {
     pub url: Option<Url>,
     /// The license of the package
     pub license: Option<String>,
+    /// The condition under which this match spec applies.
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<serde_json::Value>"))]
+    pub condition: Option<MatchSpecCondition>,
 }
 
 impl From<VersionSpec> for BinaryPackageSpec {
@@ -521,6 +579,12 @@ impl std::fmt::Debug for BinaryPackageSpec {
         if let Some(file_name) = &self.file_name {
             debug_struct.field("file_name", file_name);
         }
+        if let Some(extras) = &self.extras {
+            debug_struct.field("extras", extras);
+        }
+        if let Some(flags) = &self.flags {
+            debug_struct.field("flags", flags);
+        }
         if let Some(channel) = &self.channel {
             debug_struct.field("channel", channel);
         }
@@ -532,6 +596,9 @@ impl std::fmt::Debug for BinaryPackageSpec {
         }
         if let Some(sha256) = &self.sha256 {
             debug_struct.field("sha256", &format!("{sha256:x}"));
+        }
+        if let Some(condition) = &self.condition {
+            debug_struct.field("condition", condition);
         }
 
         debug_struct.finish()
@@ -550,6 +617,7 @@ impl Hash for ProjectModel {
             build_number,
             version,
             description,
+            build_flags,
             authors,
             license,
             license_file,
@@ -565,6 +633,7 @@ impl Hash for ProjectModel {
             .field("authors", authors)
             .field("build_string_prefix", build_string_prefix)
             .field("build_number", build_number)
+            .field("build_flags", build_flags)
             .field("description", description)
             .field("documentation", documentation)
             .field("homepage", homepage)
@@ -589,8 +658,12 @@ impl Hash for TargetSelector {
             TargetSelector::Linux => 1u8.hash(state),
             TargetSelector::Win => 2u8.hash(state),
             TargetSelector::MacOs => 3u8.hash(state),
-            TargetSelector::Platform(p) => {
+            TargetSelector::Subdir(s) => {
                 4u8.hash(state);
+                s.hash(state);
+            }
+            TargetSelector::Platform(p) => {
+                5u8.hash(state);
                 p.hash(state);
             }
         }
@@ -624,10 +697,12 @@ impl Hash for Target {
             host_dependencies,
             run_dependencies,
             run_constraints,
+            extra_dependencies,
         } = self;
 
         StableHashBuilder::<H>::new()
             .field("build_dependencies", build_dependencies)
+            .field("extra_dependencies", extra_dependencies)
             .field("host_dependencies", host_dependencies)
             .field("run_dependencies", run_dependencies)
             .field("run_constraints", run_constraints)
@@ -837,11 +912,15 @@ impl Hash for BinaryPackageSpec {
     /// field configurations produce different hashes while maintaining
     /// forward/backward compatibility.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let condition = self.condition.as_ref().map(ToString::to_string);
         StableHashBuilder::<H>::new()
             .field("build", &self.build)
             .field("build_number", &self.build_number)
             .field("channel", &self.channel)
+            .field("condition", &condition)
+            .field("extras", &self.extras)
             .field("file_name", &self.file_name)
+            .field("flags", &self.flags)
             .field("license", &self.license)
             .field("md5", &self.md5)
             .field("sha256", &self.sha256)
@@ -873,6 +952,7 @@ mod tests {
             build_string_prefix: None,
             version: None,
             description: None,
+            build_flags: None,
             authors: None,
             license: None,
             license_file: None,
@@ -901,6 +981,7 @@ mod tests {
             build_dependencies: Some(OrderMap::new()),
             run_dependencies: Some(OrderMap::new()),
             run_constraints: Some(OrderMap::new()),
+            extra_dependencies: None,
         };
         project_model.targets = Some(Targets {
             default_target: Some(empty_target),
@@ -933,6 +1014,7 @@ mod tests {
             build_string_prefix: None,
             version: None,
             description: None,
+            build_flags: None,
             authors: None,
             license: None,
             license_file: None,
@@ -954,7 +1036,7 @@ mod tests {
         let mut deps = OrderMap::new();
         deps.insert(
             SourcePackageName::from(rattler_conda_types::PackageName::new_unchecked("python")),
-            PackageSpec::Binary(BinaryPackageSpec::default()),
+            PackageSpec::from(BinaryPackageSpec::default()),
         );
 
         let target_with_deps = Target {
@@ -962,6 +1044,7 @@ mod tests {
             build_dependencies: Some(OrderMap::new()),
             run_dependencies: Some(OrderMap::new()),
             run_constraints: Some(OrderMap::new()),
+            extra_dependencies: None,
         };
         project_model.targets = Some(Targets {
             default_target: Some(target_with_deps),
@@ -998,6 +1081,7 @@ mod tests {
             sha256: None,
             url: None,
             license: None,
+            ..Default::default()
         };
         let hash2 = calculate_hash(&spec2);
 
@@ -1023,7 +1107,7 @@ mod tests {
     #[test]
     fn test_enum_variant_hash_stability() {
         // Test PackageSpecV1 enum variants
-        let binary_spec = PackageSpec::Binary(BinaryPackageSpec::default());
+        let binary_spec = PackageSpec::from(BinaryPackageSpec::default());
         let source_spec = PackageSpec::Source(SourcePackageSpec::from(PathSpec {
             path: "test".to_string(),
         }));
@@ -1038,7 +1122,7 @@ mod tests {
         );
 
         // Same variant with same content should have same hash
-        let binary_spec2 = PackageSpec::Binary(BinaryPackageSpec::default());
+        let binary_spec2 = PackageSpec::from(BinaryPackageSpec::default());
         let hash3 = calculate_hash(&binary_spec2);
 
         assert_eq!(
@@ -1053,26 +1137,27 @@ mod tests {
                 SourcePackageName::from(rattler_conda_types::PackageName::new_unchecked(
                     "host_dep1",
                 )),
-                PackageSpec::Binary(BinaryPackageSpec::default()),
+                PackageSpec::from(BinaryPackageSpec::default()),
             )])),
             build_dependencies: Some(OrderMap::from([(
                 SourcePackageName::from(rattler_conda_types::PackageName::new_unchecked(
                     "build_dep1",
                 )),
-                PackageSpec::Binary(BinaryPackageSpec::default()),
+                PackageSpec::from(BinaryPackageSpec::default()),
             )])),
             run_dependencies: Some(OrderMap::from([(
                 SourcePackageName::from(rattler_conda_types::PackageName::new_unchecked(
                     "run_dep1",
                 )),
-                PackageSpec::Binary(BinaryPackageSpec::default()),
+                PackageSpec::from(BinaryPackageSpec::default()),
             )])),
             run_constraints: Some(OrderMap::from([(
                 SourcePackageName::from(rattler_conda_types::PackageName::new_unchecked(
                     "run_const1",
                 )),
-                PackageSpec::Binary(BinaryPackageSpec::default()),
+                PackageSpec::Binary(Box::default()),
             )])),
+            extra_dependencies: None,
         }
     }
 
@@ -1182,7 +1267,7 @@ mod tests {
         let mut deps = OrderMap::new();
         deps.insert(
             SourcePackageName::from(rattler_conda_types::PackageName::new_unchecked("python")),
-            PackageSpec::Binary(BinaryPackageSpec::default()),
+            PackageSpec::Binary(Box::default()),
         );
 
         let target = Target {
@@ -1190,6 +1275,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: Some(deps),
+            extra_dependencies: None,
         };
         assert!(!target.is_empty());
 
@@ -1198,6 +1284,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: None,
+            extra_dependencies: None,
         };
         assert!(empty.is_empty());
     }
@@ -1210,7 +1297,7 @@ mod tests {
         let mut deps = OrderMap::new();
         deps.insert(
             SourcePackageName::from(rattler_conda_types::PackageName::new_unchecked("python")),
-            PackageSpec::Binary(BinaryPackageSpec::default()),
+            PackageSpec::from(BinaryPackageSpec::default()),
         );
 
         // Same dependency in host_dependencies
@@ -1219,6 +1306,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: None,
+            extra_dependencies: None,
         };
 
         // Same dependency in run_dependencies
@@ -1227,6 +1315,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: Some(deps.clone()),
             run_constraints: None,
+            extra_dependencies: None,
         };
 
         // Same dependency in build_dependencies
@@ -1235,6 +1324,7 @@ mod tests {
             build_dependencies: Some(deps.clone()),
             run_dependencies: None,
             run_constraints: None,
+            extra_dependencies: None,
         };
         // Same dependency in run_constraints
         let target4 = Target {
@@ -1242,6 +1332,7 @@ mod tests {
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: Some(deps.clone()),
+            extra_dependencies: None,
         };
 
         let hash1 = calculate_hash(&target1);

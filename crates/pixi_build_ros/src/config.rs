@@ -78,6 +78,13 @@ pub struct RosBackendConfig {
 
     /// Build number for the resulting package. When unset, defaults to 0.
     pub build_number: Option<u64>,
+
+    /// When `true`, skip workspace-sibling discovery for this package and
+    /// resolve every dependency as a binary through RoboStack instead. Useful
+    /// for pinning a single package against a stability baseline while
+    /// iterating on the rest of the workspace.
+    #[serde(default)]
+    pub ignore_workspace_sources: bool,
 }
 
 impl RosBackendConfig {
@@ -124,10 +131,10 @@ impl BackendConfig for RosBackendConfig {
             } else {
                 target_config.extra_package_mappings.clone()
             },
-            prefix_with_distro: target_config
-                .prefix_with_distro
-                .or(self.prefix_with_distro),
+            prefix_with_distro: target_config.prefix_with_distro.or(self.prefix_with_distro),
             build_number: target_config.build_number.or(self.build_number),
+            ignore_workspace_sources: target_config.ignore_workspace_sources
+                || self.ignore_workspace_sources,
         })
     }
 }

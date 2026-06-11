@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use minijinja::Value;
 use ordermap::OrderMap;
 use pixi_build_types::{
-    BinaryPackageSpec, PackageSpec, SourcePackageName, SourcePackageSpec, Target, TargetSelector,
-    Targets,
+    BinaryPackageSpec, ExtraGroupName, PackageSpec, SourcePackageName, SourcePackageSpec, Target,
+    TargetSelector, Targets,
     procedures::conda_build_v1::{
         CondaBuildV1Dependency, CondaBuildV1DependencySource, CondaBuildV1Prefix,
         CondaBuildV1RunExports,
@@ -77,7 +77,9 @@ pub fn convert_variant_to_pixi_build_types(
 
 pub fn to_rattler_build_selector(selector: &TargetSelector, platform_kind: PlatformKind) -> String {
     match selector {
-        TargetSelector::Platform(p) => format!("{platform_kind}_platform == '{p}'"),
+        TargetSelector::Platform(p) | TargetSelector::Subdir(p) => {
+            format!("{platform_kind}_platform == '{p}'")
+        }
         _ => selector.to_string(),
     }
 }
@@ -101,6 +103,7 @@ pub fn from_targets_v1_to_conditional_requirements(targets: &Targets) -> Require
     let mut host_items = ConditionalList::default();
     let mut run_items = ConditionalList::default();
     let mut run_constraints_items = ConditionalList::default();
+    let mut extras: BTreeMap<String, ConditionalList<SerializableMatchSpec>> = BTreeMap::new();
 
     // Add default target
     if let Some(default_target) = &targets.default_target {
@@ -136,7 +139,17 @@ pub fn from_targets_v1_to_conditional_requirements(targets: &Targets) -> Require
                 .into_iter()
                 .map(|spec| spec.1)
                 .map(package_dependency_to_item),
-        )
+        );
+
+        if let Some(default_extras) = &default_target.extra_dependencies {
+            for (group, deps) in default_extras {
+                let items = package_specs_to_package_dependency(deps.clone())
+                    .unwrap()
+                    .into_iter()
+                    .map(package_dependency_to_item);
+                extras.entry(group.to_string()).or_default().extend(items);
+            }
+        }
     }
 
     // Add specific targets
@@ -184,6 +197,16 @@ pub fn from_targets_v1_to_conditional_requirements(targets: &Targets) -> Require
                     .map(|spec| spec.1)
                     .map(make_conditional),
             );
+
+            if let Some(target_extras) = &target.extra_dependencies {
+                for (group, deps) in target_extras {
+                    let items = package_specs_to_package_dependency(deps.clone())
+                        .unwrap()
+                        .into_iter()
+                        .map(&make_conditional);
+                    extras.entry(group.to_string()).or_default().extend(items);
+                }
+            }
         }
     }
 
@@ -192,6 +215,7 @@ pub fn from_targets_v1_to_conditional_requirements(targets: &Targets) -> Require
         host: host_items,
         run: run_items,
         run_constraints: run_constraints_items,
+        extras,
         ..Default::default()
     }
 }
@@ -220,12 +244,15 @@ fn binary_package_spec_to_package_dependency(
         build,
         build_number,
         file_name,
+        extras,
+        flags,
         channel,
         subdir,
         md5,
         sha256,
         url,
         license,
+        condition,
     } = binary_spec;
 
     // If the version is "*" and no other constraints are present, treat it as None
@@ -247,8 +274,9 @@ fn binary_package_spec_to_package_dependency(
         &sha256,
         &url,
         &license,
+        &condition,
     ) {
-        (None, None, None, None, None, None, None, None, None) => {
+        (None, None, None, None, None, None, None, None, None, None) => {
             version.filter(|v| v != &rattler_conda_types::VersionSpec::Any)
         }
         _ => Some(version.unwrap_or(rattler_conda_types::VersionSpec::Any)),
@@ -260,7 +288,7 @@ fn binary_package_spec_to_package_dependency(
         build,
         build_number,
         file_name,
-        extras: None,
+        extras,
         channel: channel.map(Channel::from_url).map(Arc::new),
         subdir,
         namespace: None,
@@ -268,9 +296,11 @@ fn binary_package_spec_to_package_dependency(
         sha256,
         url,
         license,
-        condition: None,
+        condition,
+        // `track_features` and `license_family` are deprecated matchspec fields
+        // that pixi does not propagate.
         track_features: None,
-        flags: None,
+        flags,
         license_family: None,
     })
 }
@@ -280,9 +310,10 @@ fn package_spec_to_package_dependency(
     spec: PackageSpec,
 ) -> miette::Result<PackageDependency> {
     match spec {
-        PackageSpec::Binary(binary_spec) => {
-            Ok(binary_package_spec_to_package_dependency(name, binary_spec))
-        }
+        PackageSpec::Binary(binary_spec) => Ok(binary_package_spec_to_package_dependency(
+            name,
+            *binary_spec,
+        )),
         PackageSpec::Source(source_spec) => Ok(PackageDependency::Source(
             source_package_spec_to_package_dependency(name, source_spec)?,
         )),
@@ -421,6 +452,7 @@ pub fn from_build_v1_args_to_finalized_dependencies(
     run_dependencies: Option<Vec<CondaBuildV1Dependency>>,
     run_constraints: Option<Vec<CondaBuildV1Dependency>>,
     run_exports: Option<CondaBuildV1RunExports>,
+    extra_dependencies: BTreeMap<ExtraGroupName, Vec<CondaBuildV1Dependency>>,
 ) -> FinalizedDependencies {
     FinalizedDependencies {
         build: build_prefix.map(|prefix| ResolvedDependencies {
@@ -458,16 +490,28 @@ pub fn from_build_v1_args_to_finalized_dependencies(
                 .into_iter()
                 .map(from_build_v1_dependency_to_dependency_info)
                 .collect(),
+            extra_depends: extra_dependencies
+                .into_iter()
+                .map(|(group, deps)| {
+                    (
+                        group.into_inner(),
+                        deps.into_iter()
+                            .map(from_build_v1_dependency_to_dependency_info)
+                            .collect(),
+                    )
+                })
+                .collect(),
             run_exports: run_exports
                 .map(from_build_v1_run_exports_to_run_exports)
                 .unwrap_or_default(),
-            extra_depends: Default::default(),
         },
     }
 }
 
 #[cfg(test)]
 mod test {
+    use rattler_conda_types::ParseMatchSpecOptions;
+
     use super::*;
 
     #[test]
@@ -490,6 +534,139 @@ mod test {
         };
         let match_spec = binary_package_spec_to_package_dependency(name, spec);
         assert_eq!(match_spec.to_string(), "python");
+    }
+
+    #[test]
+    fn test_binary_package_conversion_preserves_condition() {
+        use rattler_conda_types::{MatchSpecCondition, ParseMatchSpecOptions, RepodataRevision};
+
+        let name = PackageName::new_unchecked("numpy");
+        let condition = MatchSpecCondition::MatchSpec(Box::new(
+            MatchSpec::from_str(
+                "python >=3.10",
+                ParseMatchSpecOptions::lenient().with_repodata_revision(RepodataRevision::V3),
+            )
+            .unwrap(),
+        ));
+        let spec = BinaryPackageSpec {
+            version: Some("*".parse().unwrap()),
+            condition: Some(condition.clone()),
+            ..BinaryPackageSpec::default()
+        };
+        let match_spec = binary_package_spec_to_package_dependency(name, spec);
+        let PackageDependency::Binary(match_spec) = match_spec else {
+            panic!("expected binary dependency");
+        };
+        assert_eq!(match_spec.condition, Some(condition));
+    }
+
+    #[test]
+    fn test_extra_dependencies_are_finalized() {
+        let dep = CondaBuildV1Dependency {
+            spec: MatchSpec::from_str("gtest", ParseMatchSpecOptions::lenient()).unwrap(),
+            source: None,
+        };
+        let mut extra = BTreeMap::new();
+        extra.insert(ExtraGroupName::new("test").unwrap(), vec![dep]);
+
+        let finalized =
+            from_build_v1_args_to_finalized_dependencies(None, None, None, None, None, extra);
+
+        let group = finalized
+            .run
+            .extra_depends
+            .get("test")
+            .expect("the `test` extra group must be finalized into run.extra_depends");
+        assert_eq!(group.len(), 1);
+        assert_eq!(group[0].spec().to_string(), "gtest");
+    }
+
+    #[test]
+    fn test_extras_conversion() {
+        // Top-level `[package.extra-dependencies.test]` lands on the default
+        // target's extras, which should round-trip through
+        // `from_targets_v1_to_conditional_requirements` as a bare
+        // `gtest` value in the `test` group.
+        let mut dependencies = OrderMap::new();
+        dependencies.insert(
+            SourcePackageName::from(PackageName::new_unchecked("gtest")),
+            BinaryPackageSpec {
+                version: Some("*".parse().unwrap()),
+                ..BinaryPackageSpec::default()
+            }
+            .into(),
+        );
+
+        let mut extras = OrderMap::new();
+        extras.insert(
+            pixi_build_types::ExtraGroupName::new("test").unwrap(),
+            dependencies,
+        );
+
+        let targets = Targets {
+            default_target: Some(Target {
+                extra_dependencies: Some(extras),
+                ..Target::default()
+            }),
+            targets: None,
+        };
+        let requirements = from_targets_v1_to_conditional_requirements(&targets);
+        let value = serde_json::to_value(&requirements.extras).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "test": ["gtest"]
+            })
+        );
+    }
+
+    /// Per-target extras must be wrapped in a `Conditional` so the resulting
+    /// recipe only pulls them in for the matching platform selector.
+    #[test]
+    fn test_per_target_extras_conversion() {
+        let mut dependencies = OrderMap::new();
+        dependencies.insert(
+            SourcePackageName::from(PackageName::new_unchecked("gtest")),
+            BinaryPackageSpec {
+                version: Some("*".parse().unwrap()),
+                ..BinaryPackageSpec::default()
+            }
+            .into(),
+        );
+
+        let mut extras = OrderMap::new();
+        extras.insert(
+            pixi_build_types::ExtraGroupName::new("test").unwrap(),
+            dependencies,
+        );
+
+        let mut platform_targets = OrderMap::new();
+        platform_targets.insert(
+            TargetSelector::Win,
+            Target {
+                extra_dependencies: Some(extras),
+                ..Target::default()
+            },
+        );
+        let targets = Targets {
+            default_target: None,
+            targets: Some(platform_targets),
+        };
+
+        let requirements = from_targets_v1_to_conditional_requirements(&targets);
+        let test_group = requirements
+            .extras
+            .get("test")
+            .expect("test group is present");
+        let first = test_group
+            .iter()
+            .next()
+            .expect("group has at least one item");
+        assert!(
+            matches!(first, Item::Conditional(_)),
+            "per-target extras must be wrapped in a Conditional, got: {first:?}",
+        );
     }
 
     /// Regression test for <https://github.com/prefix-dev/pixi/issues/4526>:
@@ -528,16 +705,18 @@ mod test {
         let mut constraints = OrderMap::new();
         constraints.insert(
             SourcePackageName::from(PackageName::new_unchecked(name)),
-            PackageSpec::Binary(BinaryPackageSpec {
+            BinaryPackageSpec {
                 version: Some(version.parse().unwrap()),
                 ..BinaryPackageSpec::default()
-            }),
+            }
+            .into(),
         );
         Target {
             host_dependencies: None,
             build_dependencies: None,
             run_dependencies: None,
             run_constraints: Some(constraints),
+            extra_dependencies: None,
         }
     }
 
