@@ -20,15 +20,10 @@ pub enum BuildScriptError {
 ///
 /// Selects the template based on `build_type` and platform, then performs
 /// variable substitution.
-///
-/// `package_xml` is consulted for every `ament_*` build type. The template
-/// substitutes it into a heredoc that writes the file alongside a staged
-/// source copy at build time. `cmake`/`catkin` templates ignore it.
 pub fn render_build_script(
     build_type: &str,
     distro: &str,
     source_dir: &Path,
-    package_xml: Option<&str>,
 ) -> Result<String, BuildScriptError> {
     // Use the current (build) platform, not the host/target platform.
     // The build script runs on the build machine.
@@ -36,15 +31,11 @@ pub fn render_build_script(
     let template = select_template(build_type, is_windows)?;
 
     let src_dir_str = source_dir.display().to_string();
-    let mut rendered = template
+    let rendered = template
         .replace("@SRC_DIR@", &src_dir_str)
         .replace("@DISTRO@", distro)
         .replace("@BUILD_DIR@", "build")
         .replace("@BUILD_TYPE@", "Release");
-
-    if let Some(xml) = package_xml {
-        rendered = rendered.replace("@PACKAGE_XML_CONTENT@", xml);
-    }
 
     Ok(rendered)
 }
@@ -76,7 +67,7 @@ mod tests {
     #[test]
     fn test_render_ament_cmake() {
         let script =
-            render_build_script("ament_cmake", "humble", &PathBuf::from("/my/source"), None).unwrap();
+            render_build_script("ament_cmake", "humble", &PathBuf::from("/my/source")).unwrap();
 
         assert!(script.contains("/my/source"));
         assert!(script.contains("Release"));
@@ -86,7 +77,7 @@ mod tests {
 
     #[test]
     fn test_render_ament_python() {
-        let script = render_build_script("ament_python", "jazzy", &PathBuf::from("/src"), None).unwrap();
+        let script = render_build_script("ament_python", "jazzy", &PathBuf::from("/src")).unwrap();
 
         assert!(script.contains("/src"));
         assert!(!script.contains("@SRC_DIR@"));
@@ -94,7 +85,7 @@ mod tests {
 
     #[test]
     fn test_render_catkin() {
-        let script = render_build_script("catkin", "noetic", &PathBuf::from("/pkg"), None).unwrap();
+        let script = render_build_script("catkin", "noetic", &PathBuf::from("/pkg")).unwrap();
 
         assert!(script.contains("/pkg"));
         assert!(script.contains("noetic"));
@@ -102,7 +93,7 @@ mod tests {
 
     #[test]
     fn test_render_ament_cargo() {
-        let script = render_build_script("ament_cargo", "kilted", &PathBuf::from("/work"), None).unwrap();
+        let script = render_build_script("ament_cargo", "kilted", &PathBuf::from("/work")).unwrap();
 
         assert!(script.contains("cargo ament-build"));
         assert!(script.contains("/work"));
@@ -113,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_build_type() {
-        let result = render_build_script("unknown_type", "jazzy", &PathBuf::from("/src"), None);
+        let result = render_build_script("unknown_type", "jazzy", &PathBuf::from("/src"));
         assert!(matches!(
             result,
             Err(BuildScriptError::UnsupportedBuildType { .. })

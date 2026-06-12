@@ -211,10 +211,7 @@ async fn generate_recipe_package_xml(
 
     // Generate build script
     let build_type = package_xml.build_type();
-    // package-xml flow always has a real package.xml on disk; nothing to
-    // synthesize. The argument is consumed only by ament_idl in pixi-native.
-    let build_script_content =
-        render_build_script(&build_type, &distro_name, &manifest_root, None)?;
+    let build_script_content = render_build_script(&build_type, &distro_name, &manifest_root)?;
 
     let mut script_env: indexmap::IndexMap<String, Value<String>> = indexmap::IndexMap::new();
     script_env.insert(
