@@ -1,10 +1,7 @@
 //! Pixi-native code path: generate a recipe directly from `pixi.toml`,
 //! without any rosdep mapping or rosdistro fetch. Dependencies come solely
-//! from the pixi.toml model.
-//!
-//! A committed `package.xml` is expected for ROS tooling (ament/rosidl/colcon)
-//! and is staged with the source at build time, but it is never parsed for
-//! dependencies and is never synthesized by the backend.
+//! from the pixi.toml model; `package.xml` is used only by ROS tooling and is
+//! never read for dependencies.
 //!
 //! Mode is selected by `RosMode::PixiNative` (or auto-detected when no
 //! `package.xml` is present alongside the manifest).
@@ -291,10 +288,6 @@ pub async fn generate(
         RosBuildType::AmentCargo => "ament_cargo",
         RosBuildType::AmentIdl => "ament_idl",
     };
-    // The package's committed package.xml is staged with the source by the
-    // build script; the backend neither synthesizes nor injects it. ROS tooling
-    // (ament_package() / setup.py / cargo-ament-build) reads it from the staged
-    // tree, while dependencies are resolved entirely by pixi.
     let script_content = render_build_script(build_type_str, &distro, &manifest_root)
         .map_err(|e| miette::miette!("failed to render build script: {e}"))?;
 

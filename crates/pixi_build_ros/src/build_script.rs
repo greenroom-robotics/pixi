@@ -20,11 +20,6 @@ pub enum BuildScriptError {
 ///
 /// Selects the template based on `build_type` and platform, then performs
 /// variable substitution.
-///
-/// The package's `package.xml` is a committed source file; the staging step in
-/// the templates copies it into the build tree alongside the source. The
-/// backend neither synthesizes nor injects it, and never parses it for
-/// dependencies — pixi is the sole authority on the environment.
 pub fn render_build_script(
     build_type: &str,
     distro: &str,
@@ -78,9 +73,6 @@ mod tests {
         assert!(script.contains("Release"));
         assert!(!script.contains("@SRC_DIR@"));
         assert!(!script.contains("@BUILD_TYPE@"));
-        // The backend no longer writes package.xml; the staged source carries
-        // the committed file. The synthesis placeholder must be gone.
-        assert!(!script.contains("@PACKAGE_XML_CONTENT@"));
     }
 
     #[test]
@@ -89,7 +81,6 @@ mod tests {
 
         assert!(script.contains("/src"));
         assert!(!script.contains("@SRC_DIR@"));
-        assert!(!script.contains("@PACKAGE_XML_CONTENT@"));
     }
 
     #[test]
@@ -109,7 +100,6 @@ mod tests {
         assert!(script.contains("kilted"));
         assert!(!script.contains("@SRC_DIR@"));
         assert!(!script.contains("@DISTRO@"));
-        assert!(!script.contains("@PACKAGE_XML_CONTENT@"));
     }
 
     #[test]

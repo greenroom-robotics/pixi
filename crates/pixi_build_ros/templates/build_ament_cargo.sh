@@ -4,11 +4,8 @@
 
 set -eo pipefail
 
-# Stage source into a work-dir-local copy. The package's committed package.xml
-# is a normal source file, so the tar below carries it into the staged copy —
-# cargo-ament-build copies package.xml into share/<pkg>/ at install time and
-# errors if it isn't present. Dependencies are resolved by pixi, not parsed
-# from package.xml.
+# Stage source into a work-dir-local copy. Staging keeps the user's tree clean
+# and avoids concurrent-build races.
 #
 # In pixi-native mode @SRC_DIR@ is the user's manifest dir and $PWD is
 # <SRC_DIR>/.pixi/build/work/.../work — STAGE_DIR therefore sits inside

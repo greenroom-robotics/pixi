@@ -209,8 +209,7 @@ async fn generate_recipe_package_xml(
     requirements.build = merge_conditional_lists(&requirements.build, &build_items)?;
     requirements.run = merge_conditional_lists(&requirements.run, &run_items)?;
 
-    // Generate build script. The committed package.xml on disk is staged with
-    // the source by the build script; the backend never writes one.
+    // Generate build script
     let build_type = package_xml.build_type();
     let build_script_content = render_build_script(&build_type, &distro_name, &manifest_root)?;
 
