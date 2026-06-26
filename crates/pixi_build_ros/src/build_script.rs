@@ -76,7 +76,8 @@ mod tests {
     #[test]
     fn test_render_ament_cmake() {
         let script =
-            render_build_script("ament_cmake", "humble", &PathBuf::from("/my/source"), None).unwrap();
+            render_build_script("ament_cmake", "humble", &PathBuf::from("/my/source"), None)
+                .unwrap();
 
         assert!(script.contains("/my/source"));
         assert!(script.contains("Release"));
@@ -86,7 +87,8 @@ mod tests {
 
     #[test]
     fn test_render_ament_python() {
-        let script = render_build_script("ament_python", "jazzy", &PathBuf::from("/src"), None).unwrap();
+        let script =
+            render_build_script("ament_python", "jazzy", &PathBuf::from("/src"), None).unwrap();
 
         assert!(script.contains("/src"));
         assert!(!script.contains("@SRC_DIR@"));
@@ -102,7 +104,8 @@ mod tests {
 
     #[test]
     fn test_render_ament_cargo() {
-        let script = render_build_script("ament_cargo", "kilted", &PathBuf::from("/work"), None).unwrap();
+        let script =
+            render_build_script("ament_cargo", "kilted", &PathBuf::from("/work"), None).unwrap();
 
         assert!(script.contains("cargo ament-build"));
         assert!(script.contains("/work"));

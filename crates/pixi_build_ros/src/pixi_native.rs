@@ -171,12 +171,11 @@ pub async fn generate(
     // form. Dependency names in the model are NOT rewritten — only the
     // produced package name.
     let mut model_for_recipe = model.clone();
-    if config.prefix_with_distro.unwrap_or(false) {
-        if let Some(name) = &model_for_recipe.name {
-            if !name.starts_with(&format!("ros-{distro}-")) {
-                model_for_recipe.name = Some(format!("ros-{distro}-{name}"));
-            }
-        }
+    if config.prefix_with_distro.unwrap_or(false)
+        && let Some(name) = &model_for_recipe.name
+        && !name.starts_with(&format!("ros-{distro}-"))
+    {
+        model_for_recipe.name = Some(format!("ros-{distro}-{name}"));
     }
     let mut generated = GeneratedRecipe::from_model(model_for_recipe, &mut DefaultMetadataProvider)
         .map_err(|e| miette::miette!("failed to derive recipe from model: {e:?}"))?;
@@ -250,7 +249,7 @@ pub async fn generate(
     // run-deps below.
     if build_type == RosBuildType::AmentIdl {
         for generator in [
-            "rosidl-default-generators",   // c, cpp, py
+            "rosidl-default-generators", // c, cpp, py
             "rosidl-generator-pydantic",
             "rosidl-generator-mypy",
             "rosidl-generator-rs",
@@ -290,9 +289,13 @@ pub async fn generate(
     // ament_package() / setup.py / cargo-ament-build all read or install it.
     // Plain cmake/catkin builds ignore this argument.
     let synth_xml = Some(synthesize_package_xml(model, build_type));
-    let script_content =
-        render_build_script(build_type_str, &distro, &manifest_root, synth_xml.as_deref())
-            .map_err(|e| miette::miette!("failed to render build script: {e}"))?;
+    let script_content = render_build_script(
+        build_type_str,
+        &distro,
+        &manifest_root,
+        synth_xml.as_deref(),
+    )
+    .map_err(|e| miette::miette!("failed to render build script: {e}"))?;
 
     let mut script_env: IndexMap<String, Value<String>> = IndexMap::new();
     script_env.insert(
@@ -318,8 +321,7 @@ pub async fn generate(
     }
 
     if is_noarch {
-        generated.recipe.build.noarch =
-            Some(Value::new_concrete(NoArchType::python(), None));
+        generated.recipe.build.noarch = Some(Value::new_concrete(NoArchType::python(), None));
     }
 
     // Add input globs the cache invalidator should watch. Pixi-native mode
@@ -328,11 +330,11 @@ pub async fn generate(
         .iter()
         .chain(crate::globs::ROS_PYTHON_SOURCE_GLOBS.iter())
     {
-        generated.metadata_input_globs.insert((*glob).to_string());
+        generated.metadata_input_globs.push((*glob).to_string());
     }
     if let Some(extra) = &config.extra_input_globs {
         for g in extra {
-            generated.metadata_input_globs.insert(g.clone());
+            generated.metadata_input_globs.push(g.clone());
         }
     }
 
@@ -364,11 +366,7 @@ fn spec(name: &str) -> Item<SerializableMatchSpec> {
 /// in the model; if absent or unparseable, fall back to a placeholder.
 fn synthesize_package_xml(model: &ProjectModel, build_type: RosBuildType) -> String {
     // ROS package names must be snake_case; pixi.toml often uses kebab-case.
-    let name = model
-        .name
-        .as_deref()
-        .unwrap_or("unnamed")
-        .replace('-', "_");
+    let name = model.name.as_deref().unwrap_or("unnamed").replace('-', "_");
     let name = name.as_str();
     let version = model
         .version
@@ -407,8 +405,7 @@ fn synthesize_package_xml(model: &ProjectModel, build_type: RosBuildType) -> Str
     if build_type == RosBuildType::AmentIdl {
         buildtool_block
             .push_str("  <buildtool_depend>rosidl_default_generators</buildtool_depend>\n");
-        group_block
-            .push_str("  <member_of_group>rosidl_interface_packages</member_of_group>\n");
+        group_block.push_str("  <member_of_group>rosidl_interface_packages</member_of_group>\n");
     }
 
     format!(
@@ -440,13 +437,17 @@ fn synthesize_package_xml(model: &ProjectModel, build_type: RosBuildType) -> Str
 /// whole string as name with a placeholder email if the angle-bracket form
 /// isn't present.
 fn parse_author(author: &str) -> (String, String) {
-    if let Some(open) = author.rfind('<') {
-        if let Some(close) = author[open..].find('>') {
-            let name = author[..open].trim().trim_end_matches(',').trim().to_string();
-            let email = author[open + 1..open + close].trim().to_string();
-            if !name.is_empty() && !email.is_empty() {
-                return (name, email);
-            }
+    if let Some(open) = author.rfind('<')
+        && let Some(close) = author[open..].find('>')
+    {
+        let name = author[..open]
+            .trim()
+            .trim_end_matches(',')
+            .trim()
+            .to_string();
+        let email = author[open + 1..open + close].trim().to_string();
+        if !name.is_empty() && !email.is_empty() {
+            return (name, email);
         }
     }
     (author.trim().to_string(), "noreply@example.com".to_string())

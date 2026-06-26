@@ -151,6 +151,7 @@ impl TargetSelector for pbt::TargetSelector {
     fn matches(&self, platform: Platform) -> bool {
         match self {
             pbt::TargetSelector::Platform(p) => p == &platform.to_string(),
+            pbt::TargetSelector::Subdir(s) => s == &platform.to_string(),
             pbt::TargetSelector::Linux => platform.is_linux(),
             pbt::TargetSelector::Unix => platform.is_unix(),
             pbt::TargetSelector::Win => platform.is_windows(),
@@ -174,7 +175,7 @@ impl Targets for pbt::Targets {
     }
 
     fn empty_spec() -> pbt::PackageSpec {
-        pbt::PackageSpec::Binary(rattler_conda_types::VersionSpec::Any.into())
+        rattler_conda_types::VersionSpec::Any.into()
     }
 
     fn run_dependencies(
