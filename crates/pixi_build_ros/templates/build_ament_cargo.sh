@@ -15,7 +15,7 @@ set -eo pipefail
 STAGE_DIR="$PWD/src_stage"
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
-tar -C "@SRC_DIR@" --exclude=./.pixi --exclude=./.git -cf - . | tar -C "$STAGE_DIR" -xf -
+tar -C "@SRC_DIR@" --exclude=./.pixi --exclude=./.git --exclude=./.cargo --exclude=./target -cf - . | tar -C "$STAGE_DIR" -xf -
 
 cat > "$STAGE_DIR/package.xml" <<'__PIXI_NATIVE_PACKAGE_XML__'
 @PACKAGE_XML_CONTENT@
@@ -33,6 +33,27 @@ if [ -n "${CC:-}" ]; then
   export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="${CC}"
   export RUSTFLAGS="-C linker=${CC} ${RUSTFLAGS:-}"
 fi
+
+# Message packages ship their generated Rust bindings under
+# $PREFIX/share/<pkg>/rust, not on crates.io. The rclrs-bound message crates
+# depend on each other by bare name (e.g. `builtin_interfaces = "*"`), so
+# without intervention cargo resolves them from crates.io — where they are
+# absent or present only as yanked stubs — and the build fails. Generate a
+# [patch.crates-io] table redirecting every in-prefix binding to its local
+# path so cargo resolves them from the build environment. Patches for packages
+# not in this crate's graph are unused and warned about, but harmless.
+mkdir -p "$STAGE_DIR/.cargo"
+CARGO_PATCH_CONFIG="$STAGE_DIR/.cargo/config.toml"
+for cargo_toml in "$PREFIX"/share/*/rust/Cargo.toml; do
+  [ -e "$cargo_toml" ] || continue
+  crate_dir="$(dirname "$cargo_toml")"
+  crate_name="$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$cargo_toml" | head -n1)"
+  [ -n "$crate_name" ] || continue
+  {
+    printf '[patch.crates-io.%s]\n' "$crate_name"
+    printf 'path = "%s"\n\n' "$crate_dir"
+  } >> "$CARGO_PATCH_CONFIG"
+done
 
 # cargo-ament-build wraps `cargo build` (or `cargo check` for pure libraries)
 # and lays down the ament install layout under --install-base. Source code is
