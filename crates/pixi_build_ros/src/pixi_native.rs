@@ -285,10 +285,23 @@ pub async fn generate(
         RosBuildType::AmentCargo => "ament_cargo",
         RosBuildType::AmentIdl => "ament_idl",
     };
-    // All ament_* build types need a synthesized package.xml at build time:
+    // All ament_* build types need a package.xml at build time:
     // ament_package() / setup.py / cargo-ament-build all read or install it.
     // Plain cmake/catkin builds ignore this argument.
-    let synth_xml = Some(synthesize_package_xml(model, build_type));
+    //
+    // Prefer the real package.xml from the source tree when present: it carries
+    // the package's `<depend>` declarations, which `ament_auto_package()` needs
+    // to emit `ament_cmake_export_dependencies-extras.cmake` so downstream
+    // consumers can resolve this package's transitive link targets (e.g.
+    // `find_dependency(canreader)`). A synthesized package.xml omits deps and
+    // silently breaks transitive consumption. Fall back to synthesis only when
+    // the source carries no package.xml.
+    let package_xml_path = manifest_root.join("package.xml");
+    let xml = match std::fs::read_to_string(&package_xml_path) {
+        Ok(content) => content,
+        Err(_) => synthesize_package_xml(model, build_type),
+    };
+    let synth_xml = Some(xml);
     let script_content = render_build_script(
         build_type_str,
         &distro,
