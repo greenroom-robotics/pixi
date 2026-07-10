@@ -46,6 +46,8 @@ requirements:
     - coreutils
     - "${{ compiler('c') }}"
     - "${{ compiler('cxx') }}"
+    - if: linux
+      then: wild-linker
   host:
     - ros-kilted-rclcpp
     - python

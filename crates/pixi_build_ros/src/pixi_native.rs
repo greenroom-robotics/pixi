@@ -12,7 +12,9 @@ use miette::Diagnostic;
 use pixi_build_backend::generated_recipe::{DefaultMetadataProvider, GeneratedRecipe};
 use pixi_build_types::{ProjectModel, Target};
 use rattler_build_jinja::JinjaTemplate;
-use rattler_build_recipe::stage0::{Item, Script, SerializableMatchSpec, Value};
+use rattler_build_recipe::stage0::{
+    Conditional, Item, JinjaExpression, NestedItemList, Script, SerializableMatchSpec, Value,
+};
 use rattler_conda_types::{ChannelUrl, NoArchType, Platform};
 use thiserror::Error;
 
@@ -207,6 +209,13 @@ pub async fn generate(
     if !is_noarch {
         build_items.push(template_value("${{ compiler('c') }}"));
         build_items.push(template_value("${{ compiler('cxx') }}"));
+        // Link compiled packages with the wild linker by default. Its conda
+        // package ships an activation script that appends `-B.../libexec/wild`
+        // to C/C++/LD flags, so no build-script changes are needed. Linux-only:
+        // wild targets ELF and the package skips non-linux (see
+        // ros-recipes/vendor_recipes/wild-linker). Packages built without this
+        // backend simply don't get it — they opt in by depending on it.
+        build_items.push(linux_only_spec("wild-linker"));
     }
 
     // ament_cargo wants the rust toolchain plus the cargo-ament-build wrapper.
@@ -356,6 +365,17 @@ pub async fn generate(
 
 fn spec(name: &str) -> Item<SerializableMatchSpec> {
     Item::Value(Value::new_concrete(SerializableMatchSpec::from(name), None))
+}
+
+/// A build dep guarded by an `if: linux` selector, so it's only pulled in for
+/// linux targets (osx/win solves stay unaffected).
+fn linux_only_spec(name: &str) -> Item<SerializableMatchSpec> {
+    Item::Conditional(Conditional {
+        condition: JinjaExpression::new("linux".to_string()).expect("valid jinja expression"),
+        then: NestedItemList::single(spec(name)),
+        else_value: None,
+        condition_span: None,
+    })
 }
 
 /// Synthesize a minimal package.xml for a pixi-native package.
@@ -745,6 +765,10 @@ mod tests {
             !build_yaml.contains("compiler('cxx')"),
             "noarch ament_python build deps must not include compiler('cxx'):\n{build_yaml}"
         );
+        assert!(
+            !build_yaml.contains("wild-linker"),
+            "noarch build has no compiler, so must not inject wild-linker:\n{build_yaml}"
+        );
         // Sanity: ament_python should still get python/setuptools etc.
         assert!(build.iter().any(|s| s == "python"));
         assert!(build.iter().any(|s| s == "setuptools"));
@@ -774,6 +798,10 @@ mod tests {
         assert!(
             build_yaml.contains("compiler('c')"),
             "non-noarch ament_python must still inject compiler('c'):\n{build_yaml}"
+        );
+        assert!(
+            build_yaml.contains("wild-linker"),
+            "compiled (non-noarch) builds must inject the wild-linker:\n{build_yaml}"
         );
     }
 
