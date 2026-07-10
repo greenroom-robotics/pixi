@@ -47,7 +47,7 @@ requirements:
     - "${{ compiler('c') }}"
     - "${{ compiler('cxx') }}"
     - if: linux
-      then: wild-linker
+      then: mold-linker
   host:
     - ros-kilted-rclcpp
     - python

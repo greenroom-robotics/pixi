@@ -209,13 +209,13 @@ pub async fn generate(
     if !is_noarch {
         build_items.push(template_value("${{ compiler('c') }}"));
         build_items.push(template_value("${{ compiler('cxx') }}"));
-        // Link compiled packages with the wild linker by default. Its conda
-        // package ships an activation script that appends `-B.../libexec/wild`
-        // to C/C++/LD flags, so no build-script changes are needed. Linux-only:
-        // wild targets ELF and the package skips non-linux (see
-        // ros-recipes/vendor_recipes/wild-linker). Packages built without this
+        // Link compiled packages with the mold linker by default. The
+        // `mold-linker` conda package depends on mold and ships an activation
+        // script that appends `-fuse-ld=mold` to C/C++/LD flags, so no
+        // build-script changes are needed. Linux-only: mold targets ELF (see
+        // ros-recipes/vendor_recipes/mold-linker). Packages built without this
         // backend simply don't get it — they opt in by depending on it.
-        build_items.push(linux_only_spec("wild-linker"));
+        build_items.push(linux_only_spec("mold-linker"));
     }
 
     // ament_cargo wants the rust toolchain plus the cargo-ament-build wrapper.
@@ -766,8 +766,8 @@ mod tests {
             "noarch ament_python build deps must not include compiler('cxx'):\n{build_yaml}"
         );
         assert!(
-            !build_yaml.contains("wild-linker"),
-            "noarch build has no compiler, so must not inject wild-linker:\n{build_yaml}"
+            !build_yaml.contains("mold-linker"),
+            "noarch build has no compiler, so must not inject mold-linker:\n{build_yaml}"
         );
         // Sanity: ament_python should still get python/setuptools etc.
         assert!(build.iter().any(|s| s == "python"));
@@ -800,8 +800,8 @@ mod tests {
             "non-noarch ament_python must still inject compiler('c'):\n{build_yaml}"
         );
         assert!(
-            build_yaml.contains("wild-linker"),
-            "compiled (non-noarch) builds must inject the wild-linker:\n{build_yaml}"
+            build_yaml.contains("mold-linker"),
+            "compiled (non-noarch) builds must inject the mold-linker:\n{build_yaml}"
         );
     }
 
