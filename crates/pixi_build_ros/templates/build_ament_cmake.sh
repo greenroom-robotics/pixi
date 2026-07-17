@@ -74,6 +74,7 @@ if [ ! -f "build.ninja" ]; then
         -G "Ninja" \
         -S "$STAGE_DIR" \
         -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_INSTALL_PREFIX=$PREFIX \
         -DCMAKE_PREFIX_PATH=$PREFIX \
         -DAMENT_PREFIX_PATH=$PREFIX \
