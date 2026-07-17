@@ -416,7 +416,24 @@ impl GenerateRecipe for RosGenerator {
         &self,
         host_platform: Platform,
     ) -> miette::Result<BTreeMap<NormalizedKey, Vec<Variable>>> {
-        Ok(default_compiler_variants(host_platform))
+        let mut variants = default_compiler_variants(host_platform);
+        // Pin the GNU compiler on Linux so every ROS package this backend builds
+        // (channel publishes AND local `pixi build`) uses one gcc. Left unpinned,
+        // `compiler('cxx')` floats to the newest gcc and drifts between builds;
+        // prebuilt C++23 std::format then ODR-clashes across the channel boundary
+        // and segfaults at runtime. Kept in lockstep with ros-dev-tools-meta's
+        // consumer-side gcc-15 pin (ros-recipes) — bump both together.
+        if host_platform.is_linux() {
+            variants.insert(
+                NormalizedKey::from("c_compiler_version"),
+                vec!["15.2".into()],
+            );
+            variants.insert(
+                NormalizedKey::from("cxx_compiler_version"),
+                vec!["15.2".into()],
+            );
+        }
+        Ok(variants)
     }
 }
 
@@ -465,6 +482,29 @@ mod tests {
 
     fn jazzy_distro() -> Distro {
         Distro::builder("jazzy").build()
+    }
+
+    #[test]
+    fn test_default_variants_pins_gnu_compiler_on_linux() {
+        let linux = RosGenerator::default()
+            .default_variants(Platform::Linux64)
+            .unwrap();
+        assert_eq!(
+            linux.get(&NormalizedKey::from("cxx_compiler_version")),
+            Some(&vec!["15.2".into()])
+        );
+        assert_eq!(
+            linux.get(&NormalizedKey::from("c_compiler_version")),
+            Some(&vec!["15.2".into()])
+        );
+
+        // Non-Linux hosts must not get the GNU version pin.
+        let win = RosGenerator::default()
+            .default_variants(Platform::Win64)
+            .unwrap();
+        assert!(win
+            .get(&NormalizedKey::from("cxx_compiler_version"))
+            .is_none());
     }
 
     #[test]
