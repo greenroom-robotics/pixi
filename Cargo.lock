@@ -1661,7 +1661,7 @@ dependencies = [
 [[package]]
 name = "coalesced_map"
 version = "0.1.4"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "dashmap",
  "tokio",
@@ -2825,7 +2825,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 [[package]]
 name = "file_url"
 version = "0.3.2"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "itertools 0.15.0",
  "percent-encoding",
@@ -3751,12 +3751,12 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2",
  "system-configuration",
  "tokio",
  "tower-service",
  "tracing",
- "windows-registry 0.6.1",
+ "windows-registry 0.5.3",
 ]
 
 [[package]]
@@ -3771,7 +3771,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -5071,7 +5071,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.2.17",
  "http 1.4.2",
@@ -5526,7 +5526,7 @@ checksum = "1e91099d4268b0e11973f036e885d652fb0b21fedcf69738c627f94db6a44f42"
 [[package]]
 name = "path_resolver"
 version = "0.2.12"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "ahash",
  "fs-err",
@@ -7223,7 +7223,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -7366,7 +7366,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7404,7 +7404,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -7539,7 +7539,7 @@ dependencies = [
 [[package]]
 name = "rattler"
 version = "0.47.1"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "anyhow",
  "astral-reqwest-middleware",
@@ -7591,7 +7591,7 @@ dependencies = [
 [[package]]
 name = "rattler_cache"
 version = "0.10.3"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "ahash",
  "anyhow",
@@ -7624,7 +7624,7 @@ dependencies = [
 [[package]]
 name = "rattler_conda_types"
 version = "0.48.1"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "ahash",
  "core-foundation 0.10.1",
@@ -7666,7 +7666,7 @@ dependencies = [
 [[package]]
 name = "rattler_config"
 version = "0.6.1"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "dirs",
  "fs-err",
@@ -7684,7 +7684,7 @@ dependencies = [
 [[package]]
 name = "rattler_digest"
 version = "1.3.2"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "blake2 0.11.0-rc.6",
  "digest 0.11.3",
@@ -7703,7 +7703,7 @@ dependencies = [
 [[package]]
 name = "rattler_index"
 version = "0.30.9"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "ahash",
  "anyhow",
@@ -7743,7 +7743,7 @@ dependencies = [
 [[package]]
 name = "rattler_lock"
 version = "0.31.5"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "ahash",
  "file_url",
@@ -7771,7 +7771,7 @@ dependencies = [
 [[package]]
 name = "rattler_macros"
 version = "1.1.2"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "quote",
  "syn",
@@ -7780,7 +7780,7 @@ dependencies = [
 [[package]]
 name = "rattler_menuinst"
 version = "0.2.70"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "configparser",
  "dirs",
@@ -7810,7 +7810,7 @@ dependencies = [
 [[package]]
 name = "rattler_networking"
 version = "0.30.2"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "ambient-id",
  "anyhow",
@@ -7855,7 +7855,7 @@ dependencies = [
 [[package]]
 name = "rattler_package_streaming"
 version = "0.26.8"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "astral-reqwest-middleware",
  "astral-tokio-tar",
@@ -7895,7 +7895,7 @@ dependencies = [
 [[package]]
 name = "rattler_pty"
 version = "0.2.15"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "libc",
  "nix 0.31.3",
@@ -7906,7 +7906,7 @@ dependencies = [
 [[package]]
 name = "rattler_redaction"
 version = "0.2.2"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "astral-reqwest-middleware",
  "reqwest",
@@ -7916,7 +7916,7 @@ dependencies = [
 [[package]]
 name = "rattler_repodata_gateway"
 version = "0.30.1"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "ahash",
  "anyhow",
@@ -7978,7 +7978,7 @@ dependencies = [
 [[package]]
 name = "rattler_s3"
 version = "0.2.8"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -7994,7 +7994,7 @@ dependencies = [
 [[package]]
 name = "rattler_shell"
 version = "0.27.10"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "anyhow",
  "enum_dispatch",
@@ -8015,7 +8015,7 @@ dependencies = [
 [[package]]
 name = "rattler_solve"
 version = "7.2.2"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "futures",
  "hex",
@@ -8033,7 +8033,7 @@ dependencies = [
 [[package]]
 name = "rattler_upload"
 version = "0.9.0"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "astral-reqwest-middleware",
  "astral-reqwest-retry",
@@ -8071,7 +8071,7 @@ dependencies = [
 [[package]]
 name = "rattler_virtual_packages"
 version = "3.0.4"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "archspec",
  "libloading",
@@ -8155,7 +8155,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "rustix 1.1.4",
- "windows 0.62.2",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -9640,7 +9640,7 @@ dependencies = [
 [[package]]
 name = "simple_spawn_blocking"
 version = "1.1.1"
-source = "git+https://github.com/greenroom-robotics/rattler?rev=79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef#79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef"
+source = "git+https://github.com/greenroom-robotics/rattler?rev=d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec#d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec"
 dependencies = [
  "tokio",
 ]
@@ -9674,16 +9674,6 @@ name = "smawk"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7c388c1b5e93756d0c740965c41e8822f866621d41acbdf6336a6a168f8840c"
-
-[[package]]
-name = "socket2"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
-]
 
 [[package]]
 name = "socket2"
@@ -10212,7 +10202,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.3",
+ "socket2",
  "tokio-macros",
  "tracing",
  "windows-sys 0.61.2",
@@ -10394,7 +10384,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "socket2 0.6.3",
+ "socket2",
  "sync_wrapper",
  "tokio",
  "tokio-stream",
