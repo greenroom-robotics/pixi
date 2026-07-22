@@ -1,6 +1,6 @@
 ---
 source: crates/pixi_config/src/lib.rs
-assertion_line: 3238
+assertion_line: 3037
 expression: debug
 ---
 Config {
@@ -115,9 +115,6 @@ Config {
                 force_path_style: false,
             },
         },
-    ),
-    azure_options: AzureOptionsMap(
-        {},
     ),
     detached_environments: Some(
         Boolean(

@@ -167,7 +167,7 @@ async fn fetch_release_notes(version: &Option<Version>) -> miette::Result<String
         consts::RELEASES_API_LATEST.to_string()
     };
 
-    let client = build_reqwest_clients(None, None, None)?.1;
+    let client = build_reqwest_clients(None, None)?.1;
     let response = client
         .get(&url)
         .header("User-Agent", user_agent())
@@ -360,7 +360,7 @@ pub async fn execute(args: Args, global_options: &GlobalOptions) -> miette::Resu
     // Create a temp file to download the archive
     let mut archived_tempfile = NamedTempFile::new().into_diagnostic()?;
 
-    let client = build_reqwest_clients(None, None, None)?.1;
+    let client = build_reqwest_clients(None, None)?.1;
     let mut res = client
         .get(&download_url)
         .header("User-Agent", user_agent())

@@ -90,7 +90,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
 
     let mut command_iter = args.command.iter();
     let command = command_iter.next().ok_or_else(|| miette::miette!(help ="i.e when specifying specs explicitly use a command at the end: `pixi exec -s python==3.12 python`", "missing required command to execute",))?;
-    let (_, client) = build_reqwest_clients(Some(&config), None, None)?;
+    let (_, client) = build_reqwest_clients(Some(&config), None)?;
 
     // Determine the specs for installation and for the environment name.
     let exec_specs = to_exec_match_specs(&args.specs)?;

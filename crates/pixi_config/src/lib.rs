@@ -14,7 +14,7 @@ use rattler_conda_types::{
     ChannelConfig, NamedChannelOrUrl, Platform, Version, VersionBumpType, VersionSpec,
     version_spec::{EqualityOperator, LogicalOperator, RangeOperator},
 };
-use rattler_networking::{azure_middleware, s3_middleware};
+use rattler_networking::s3_middleware;
 use rattler_repodata_gateway::{Gateway, GatewayBuilder, SourceConfig, fetch::CacheAction};
 use reqwest::{NoProxy, Proxy};
 use serde::{Deserialize, Serialize, de::IntoDeserializer};
@@ -855,11 +855,6 @@ pub struct PyPIConfig {
 // keep compiling.
 pub use rattler_config::config::s3::{S3Options, S3OptionsMap};
 
-// `AzureOptions` and the `AzureOptionsMap` newtype live in `rattler_config`.
-// Re-exported so external crates can reference `pixi_config::AzureOptions`,
-// mirroring the S3 re-export above.
-pub use rattler_config::config::azure::{AzureOptions, AzureOptionsMap};
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum DetachedEnvironments {
@@ -1197,11 +1192,6 @@ pub struct Config {
     #[serde(skip_serializing_if = "S3OptionsMap::is_empty")]
     pub s3_options: S3OptionsMap,
 
-    /// Configuration for Azure Blob Storage (`az://` channels).
-    #[serde(default)]
-    #[serde(skip_serializing_if = "AzureOptionsMap::is_empty")]
-    pub azure_options: AzureOptionsMap,
-
     /// The option to specify the directory where detached environments are
     /// stored. When using 'true', it defaults to the cache directory.
     /// When using a path, it uses the specified path.
@@ -1305,7 +1295,6 @@ impl Default for Config {
             repodata_config: RepodataConfig::default(),
             pypi_config: PyPIConfig::default(),
             s3_options: S3OptionsMap::default(),
-            azure_options: AzureOptionsMap::default(),
             detached_environments: None,
             pinning_strategy: None,
             shell: ShellConfig::default(),
@@ -1848,10 +1837,6 @@ impl Config {
             "s3-options.<bucket>.endpoint-url",
             "s3-options.<bucket>.force-path-style",
             "s3-options.<bucket>.region",
-            "azure-options",
-            "azure-options.<container>",
-            "azure-options.<container>.account",
-            "azure-options.<container>.endpoint-url",
             "shell",
             "shell.change-ps1",
             "shell.force-activate",
@@ -1903,13 +1888,6 @@ impl Config {
                     .0
                     .into_iter()
                     .chain(other.s3_options.0)
-                    .collect(),
-            ),
-            azure_options: AzureOptionsMap(
-                self.azure_options
-                    .0
-                    .into_iter()
-                    .chain(other.azure_options.0)
                     .collect(),
             ),
             detached_environments: other.detached_environments.or(self.detached_environments),
@@ -2289,51 +2267,6 @@ impl Config {
                     self.s3_options.0.insert(subkey.to_string(), s3_options);
                 }
             }
-            key if key.starts_with("azure-options") => {
-                if key == "azure-options" {
-                    if let Some(value) = value {
-                        self.azure_options = serde_json::de::from_str(&value).into_diagnostic()?;
-                    } else {
-                        return Err(miette!("azure-options requires a value"));
-                    }
-                    return Ok(());
-                }
-                let Some(subkey) = key.strip_prefix("azure-options.") else {
-                    return Err(err);
-                };
-                if let Some((container, rest)) = subkey.split_once('.') {
-                    if let Some(container_config) = self.azure_options.0.get_mut(container) {
-                        match rest {
-                            "account" => {
-                                if let Some(value) = value {
-                                    container_config.account = value;
-                                } else {
-                                    return Err(miette!(
-                                        "azure-options.{}.account requires a value",
-                                        container
-                                    ));
-                                }
-                            }
-                            "endpoint-url" => {
-                                if let Some(value) = value {
-                                    container_config.endpoint_url =
-                                        Some(Url::parse(&value).into_diagnostic()?);
-                                } else {
-                                    container_config.endpoint_url = None;
-                                }
-                            }
-                            _ => return Err(err),
-                        }
-                    }
-                } else {
-                    let value = value.ok_or_else(|| miette!("azure-options requires a value"))?;
-                    let azure_options: AzureOptions =
-                        serde_json::de::from_str(&value).into_diagnostic()?;
-                    self.azure_options
-                        .0
-                        .insert(subkey.to_string(), azure_options);
-                }
-            }
             key if key.starts_with(EXPERIMENTAL) => {
                 if key == EXPERIMENTAL {
                     if let Some(value) = value {
@@ -2565,28 +2498,6 @@ impl Config {
                         region: v.region.clone(),
                         force_path_style: v.force_path_style,
                     },
-                )
-            })
-            .collect()
-    }
-
-    /// Compute the per-container Azure Blob Storage middleware configuration
-    /// from the `azure-options` config. A container with an `endpoint-url`
-    /// override maps to [`azure_middleware::AzureConfig::Endpoint`], otherwise
-    /// to [`azure_middleware::AzureConfig::Account`] (the default endpoint is
-    /// derived from the storage account). Credentials are resolved separately
-    /// by reqsign at request time, so they are not part of this config.
-    pub fn compute_azure_config(&self) -> HashMap<String, azure_middleware::AzureConfig> {
-        self.azure_options
-            .0
-            .iter()
-            .map(|(container, options)| {
-                (
-                    container.clone(),
-                    options.endpoint_url.clone().map_or_else(
-                        || azure_middleware::AzureConfig::Account(options.account.clone()),
-                        azure_middleware::AzureConfig::Endpoint,
-                    ),
                 )
             })
             .collect()
@@ -3007,39 +2918,6 @@ UNUSED = "unused"
     }
 
     #[test]
-    fn test_azure_options_parse() {
-        let toml = r#"
-            [azure-options.general]
-            account = "stgrcondachannel"
-
-            [azure-options.custom]
-            account = "myaccount"
-            endpoint-url = "http://127.0.0.1:10000/myaccount"
-        "#;
-        let (config, _) = Config::from_toml(toml, None).unwrap();
-        let azure_options = &config.azure_options.0;
-        assert_eq!(azure_options["general"].account, "stgrcondachannel");
-        assert_eq!(azure_options["general"].endpoint_url, None);
-        assert_eq!(azure_options["custom"].account, "myaccount");
-        assert_eq!(
-            azure_options["custom"].endpoint_url,
-            Some(Url::parse("http://127.0.0.1:10000/myaccount").unwrap())
-        );
-
-        // The account-only container maps to `Account`, the override to `Endpoint`.
-        let computed = config.compute_azure_config();
-        assert!(matches!(
-            &computed["general"],
-            azure_middleware::AzureConfig::Account(a) if a == "stgrcondachannel"
-        ));
-        assert!(matches!(
-            &computed["custom"],
-            azure_middleware::AzureConfig::Endpoint(u)
-                if u.as_str() == "http://127.0.0.1:10000/myaccount"
-        ));
-    }
-
-    #[test]
     fn test_default_config() {
         let config = Config::default();
         // This depends on the system so it's hard to test.
@@ -3091,13 +2969,6 @@ UNUSED = "unused"
                     endpoint_url: Url::parse("https://my-s3-host").unwrap(),
                     region: "us-east-1".to_string(),
                     force_path_style: false,
-                },
-            )])),
-            azure_options: AzureOptionsMap(IndexMap::from([(
-                "general".into(),
-                AzureOptions {
-                    account: "stgrcondachannel".to_string(),
-                    endpoint_url: None,
                 },
             )])),
             repodata_config: RepodataConfig {

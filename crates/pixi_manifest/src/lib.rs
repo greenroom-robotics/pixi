@@ -1,5 +1,4 @@
 mod activation;
-mod azure;
 mod build_system;
 pub(crate) mod channel;
 mod dependencies;
@@ -29,7 +28,6 @@ pub mod utils;
 mod warning;
 mod workspace;
 pub use activation::Activation;
-pub use azure::AzureOptions;
 pub use build_system::BuildBackend;
 pub use build_system::PackageBuild;
 pub use channel::PrioritizedChannel;
