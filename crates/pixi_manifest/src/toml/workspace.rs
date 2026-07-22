@@ -13,8 +13,8 @@ use toml_span::{DeserError, Span, Spanned, Value, de_helpers::TableHelper, value
 use url::Url;
 
 use crate::{
-    KnownPreviewFeature, PixiPlatform, PrioritizedChannel, S3Options, TargetSelector, Targets,
-    TomlError, WithWarnings, Workspace,
+    AzureOptions, KnownPreviewFeature, PixiPlatform, PrioritizedChannel, S3Options, TargetSelector,
+    Targets, TomlError, WithWarnings, Workspace,
     error::GenericError,
     pypi::pypi_options::PypiOptions,
     toml::{
@@ -114,6 +114,7 @@ pub struct TomlWorkspace {
     pub conda_pypi_map: Option<CondaPypiMap>,
     pub pypi_options: Option<PypiOptions>,
     pub s3_options: Option<HashMap<String, S3Options>>,
+    pub azure_options: Option<HashMap<String, AzureOptions>>,
     pub preview: TomlPreview,
     pub target: IndexMap<PixiSpanned<TargetSelector>, TomlWorkspaceTarget>,
     pub build_variants: Option<HashMap<String, Vec<String>>>,
@@ -251,6 +252,7 @@ impl TomlWorkspace {
             conda_pypi_map: self.conda_pypi_map,
             pypi_options: self.pypi_options,
             s3_options: self.s3_options,
+            azure_options: self.azure_options,
             preview,
             build_variant_files: build_variant_files_default,
             build_variants: Targets::from_default_and_user_defined(
@@ -385,6 +387,9 @@ impl<'de> toml_span::Deserialize<'de> for TomlWorkspace {
         let s3_options = th
             .optional::<TomlHashMap<_, _>>("s3-options")
             .map(TomlHashMap::into_inner);
+        let azure_options = th
+            .optional::<TomlHashMap<_, _>>("azure-options")
+            .map(TomlHashMap::into_inner);
         let preview = th.optional("preview").unwrap_or_default();
         let target = th
             .optional::<TomlIndexMap<_, _>>("target")
@@ -422,6 +427,7 @@ impl<'de> toml_span::Deserialize<'de> for TomlWorkspace {
             conda_pypi_map,
             pypi_options,
             s3_options,
+            azure_options,
             preview,
             target: target.unwrap_or_default(),
             build_variants,

@@ -16,8 +16,8 @@ use url::Url;
 
 use super::pypi::pypi_options::PypiOptions;
 use crate::{
-    PixiPlatform, PixiPlatformName, PrioritizedChannel, S3Options, TargetSelector, Targets,
-    preview::Preview,
+    AzureOptions, PixiPlatform, PixiPlatformName, PrioritizedChannel, S3Options, TargetSelector,
+    Targets, preview::Preview,
 };
 use minijinja::{AutoEscape, Environment, UndefinedBehavior};
 use once_cell::sync::Lazy;
@@ -82,6 +82,9 @@ pub struct Workspace {
 
     /// The S3 options supported in the project
     pub s3_options: Option<HashMap<String, S3Options>>,
+
+    /// The Azure Blob Storage options supported in the project
+    pub azure_options: Option<HashMap<String, AzureOptions>>,
 
     /// Preview features
     pub preview: Preview,

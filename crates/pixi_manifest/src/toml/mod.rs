@@ -1,3 +1,4 @@
+mod azure_options;
 mod build_backend;
 mod build_target;
 mod channel;
