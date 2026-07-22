@@ -11,29 +11,6 @@ exclude = [
   "tests/data",
   "trampoline",
   "pytest-temp",
-  # --- Azure fork divergence ---------------------------------------------
-  # These pixi build-backend crates pin the published rattler-build release
-  # (rattler_build_core 0.2.9), which transitively depends on
-  # `rattler_upload 0.8.3` and thereby EXACT-pins `rattler_conda_types
-  # =0.48.0`. The `[patch.crates-io]` block below redirects the whole
-  # rattler_* surface to the greenroom-robotics fork (for `az://` support),
-  # whose HEAD is at `rattler_conda_types 0.48.1` — one patch version ahead.
-  # The two cannot coexist in a single Cargo.lock (the exact pin has no
-  # satisfying version once conda_types is 0.48.1).
-  #
-  # These backends are built separately (each has its own recipe pinned to a
-  # pre-azure rev) and are NOT part of pixi's fetch/solve/download path, so
-  # excluding them here lets the `pixi` binary build against the azure fork.
-  # To re-include them, bump the rattler-build crates to a release built
-  # against rattler_upload 0.9 / rattler_conda_types 0.48.1.
-  "crates/pixi_build_backend",
-  "crates/pixi_build_cmake",
-  "crates/pixi_build_mojo",
-  "crates/pixi_build_python",
-  "crates/pixi_build_r",
-  "crates/pixi_build_rattler_build",
-  "crates/pixi_build_ros",
-  "crates/pixi_build_rust",
 ]
 members = ["crates/*"]
 resolver = "3"
@@ -275,7 +252,7 @@ rattler_repodata_gateway = { version = "0.30", default-features = false }
 rattler_s3 = { version = "0.2", default-features = false }
 rattler_shell = { version = "0.27", default-features = false }
 rattler_solve = { version = "7.2", default-features = false }
-rattler_upload = { version = "0.9", default-features = false, features = [
+rattler_upload = { version = "0.8", default-features = false, features = [
   "s3",
   "sigstore-sign",
 ] }
@@ -313,29 +290,29 @@ reqwest-middleware = { path = "patches/reqwest_middleware_shim" }
 # rattler_* crate (plus its siblings `file_url`, `simple_spawn_blocking`,
 # `path_resolver`, `coalesced_map`) to a single git rev keeps one source of
 # truth. See vendor_recipes/rattler-build-gr in ros-recipes for the precedent.
-coalesced_map = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-file_url = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-path_resolver = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_cache = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_conda_types = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_config = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_digest = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_index = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_lock = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_macros = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_menuinst = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_networking = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_package_streaming = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_pty = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_redaction = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_repodata_gateway = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_s3 = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_shell = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_solve = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_upload = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-rattler_virtual_packages = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
-simple_spawn_blocking = { git = "https://github.com/greenroom-robotics/rattler", rev = "d9e4334a795f3775ef5cdb2cb5ab3b0e6f3f67ec" }
+coalesced_map = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+file_url = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+path_resolver = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_cache = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_conda_types = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_config = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_digest = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_index = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_lock = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_macros = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_menuinst = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_networking = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_package_streaming = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_pty = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_redaction = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_repodata_gateway = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_s3 = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_shell = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_solve = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_upload = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+rattler_virtual_packages = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
+simple_spawn_blocking = { git = "https://github.com/greenroom-robotics/rattler", rev = "c5f5612ebd247187053ee9a08b4683ac00d4ba87" }
 
 # Strip debug info from dependencies: faster links, much smaller `target/`,
 # while keeping full debuggability for our own crates.

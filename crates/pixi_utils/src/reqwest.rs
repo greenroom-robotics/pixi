@@ -247,7 +247,7 @@ pub fn build_reqwest_middleware_stack(
     // The Azure middleware rewrites `az://{account}.blob.core.windows.net/...`
     // requests into signed HTTPS Azure Blob Storage requests (the storage
     // account is spelled out in the URL host) and is a no-op for other schemes.
-    result.push(Arc::new(AzureMiddleware::new()));
+    result.push(Arc::new(AzureMiddleware::new(client.clone().into_client())));
 
     result.push(Arc::new(
         get_auth_middleware(config).expect("could not create auth middleware"),
