@@ -60,7 +60,7 @@ use rattler_conda_types::{
 use rattler_lock::LockFile;
 
 use crate::lock_file::LockedPackageKind;
-use rattler_networking::{LazyClient, s3_middleware};
+use rattler_networking::{LazyClient, azure_middleware, s3_middleware};
 use rattler_repodata_gateway::Gateway;
 use rattler_virtual_packages::{
     Cuda, EnvOverride, LibC, Linux, Osx, Override, VirtualPackageOverrides, VirtualPackages,
@@ -180,6 +180,9 @@ pub struct Workspace {
 
     /// The S3 configuration
     s3_config: HashMap<String, s3_middleware::S3Config>,
+
+    /// The Azure Blob Storage configuration
+    azure_config: HashMap<String, azure_middleware::AzureConfig>,
 
     /// The concurrent request semaphore
     concurrent_downloads_semaphore: OnceCell<Arc<Semaphore>>,
@@ -378,6 +381,21 @@ impl Workspace {
             })
             .collect::<HashMap<String, s3_middleware::S3Config>>();
 
+        let azure_options = manifest.workspace.value.workspace.azure_options.clone();
+        let azure_config = azure_options
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    value.endpoint_url.map_or_else(
+                        || azure_middleware::AzureConfig::Account(value.account),
+                        azure_middleware::AzureConfig::Endpoint,
+                    ),
+                )
+            })
+            .collect::<HashMap<String, azure_middleware::AzureConfig>>();
+
         let config = Config::load_with(&root, source);
         Self {
             root,
@@ -389,6 +407,7 @@ impl Workspace {
             derivation_mode: Default::default(),
             config,
             s3_config,
+            azure_config,
             repodata_gateway: Default::default(),
             concurrent_downloads_semaphore: OnceCell::default(),
             backend_override: None,
@@ -877,7 +896,11 @@ impl Workspace {
         &self,
     ) -> miette::Result<&(LazyReqwestClient, rattler_networking::LazyClient)> {
         self.client.get_or_try_init(|| {
-            build_lazy_reqwest_clients(Some(self.config()), Some(self.s3_config.clone()))
+            build_lazy_reqwest_clients(
+                Some(self.config()),
+                Some(self.s3_config.clone()),
+                Some(self.azure_config.clone()),
+            )
         })
     }
 

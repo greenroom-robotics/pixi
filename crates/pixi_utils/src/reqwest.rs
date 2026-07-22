@@ -10,8 +10,8 @@ use pixi_auth::{get_auth_middleware, get_auth_store};
 use pixi_config::Config;
 use pixi_consts::consts;
 use rattler_networking::{
-    AuthChallengeMiddleware, GCSMiddleware, LazyClient, MirrorMiddleware, OciMiddleware,
-    OfflineMiddleware, S3Middleware, mirror_middleware::Mirror,
+    AuthChallengeMiddleware, AzureMiddleware, GCSMiddleware, LazyClient, MirrorMiddleware,
+    OciMiddleware, OfflineMiddleware, S3Middleware, mirror_middleware::Mirror,
 };
 use reqwest::Client;
 use reqwest_middleware::{ClientWithMiddleware, Middleware};
@@ -204,6 +204,9 @@ pub fn build_reqwest_middleware_stack(
     config: &Config,
     client: &LazyReqwestClient,
     s3_config_project: Option<HashMap<String, rattler_networking::s3_middleware::S3Config>>,
+    azure_config_project: Option<
+        HashMap<String, rattler_networking::azure_middleware::AzureConfig>,
+    >,
 ) -> miette::Result<Box<[Arc<dyn Middleware>]>> {
     let mut result: Vec<Arc<dyn Middleware>> = Vec::new();
 
@@ -244,6 +247,17 @@ pub fn build_reqwest_middleware_stack(
     let store = get_auth_store(config).into_diagnostic()?;
     result.push(Arc::new(S3Middleware::new(s3_config, store)));
 
+    // The Azure middleware rewrites `az://{container}/{path}` requests into
+    // signed HTTPS Azure Blob Storage requests and is a no-op for other URL
+    // schemes. Its per-container config is the global `azure-options` merged
+    // with any project-level `[workspace.azure-options]` (project wins).
+    let azure_config_global = config.compute_azure_config();
+    let azure_config_project = azure_config_project.unwrap_or_default();
+    let mut azure_config = HashMap::new();
+    azure_config.extend(azure_config_global);
+    azure_config.extend(azure_config_project);
+    result.push(Arc::new(AzureMiddleware::new(azure_config)));
+
     result.push(Arc::new(
         get_auth_middleware(config).expect("could not create auth middleware"),
     ));
@@ -257,6 +271,9 @@ pub fn build_reqwest_middleware_stack(
 pub fn build_reqwest_clients(
     config: Option<&Config>,
     s3_config_project: Option<HashMap<String, rattler_networking::s3_middleware::S3Config>>,
+    azure_config_project: Option<
+        HashMap<String, rattler_networking::azure_middleware::AzureConfig>,
+    >,
 ) -> miette::Result<(Client, ClientWithMiddleware)> {
     // If we do not have a config, we will just load the global default.
     let config = if let Some(config) = config {
@@ -266,7 +283,12 @@ pub fn build_reqwest_clients(
     };
 
     let lazy_client = LazyReqwestClient::new(&config)?;
-    let middleware = build_reqwest_middleware_stack(&config, &lazy_client, s3_config_project)?;
+    let middleware = build_reqwest_middleware_stack(
+        &config,
+        &lazy_client,
+        s3_config_project,
+        azure_config_project,
+    )?;
 
     let client = lazy_client.into_client();
     let authenticated_client = ClientWithMiddleware::new(client.clone(), middleware);
@@ -277,6 +299,9 @@ pub fn build_reqwest_clients(
 pub fn build_lazy_reqwest_clients(
     config: Option<&Config>,
     s3_config_project: Option<HashMap<String, rattler_networking::s3_middleware::S3Config>>,
+    azure_config_project: Option<
+        HashMap<String, rattler_networking::azure_middleware::AzureConfig>,
+    >,
 ) -> miette::Result<(LazyReqwestClient, LazyClient)> {
     // If we do not have a config, we will just load the global default.
     let config = if let Some(config) = config {
@@ -286,7 +311,8 @@ pub fn build_lazy_reqwest_clients(
     };
 
     let client = LazyReqwestClient::new(&config)?;
-    let middleware_stack = build_reqwest_middleware_stack(&config, &client, s3_config_project)?;
+    let middleware_stack =
+        build_reqwest_middleware_stack(&config, &client, s3_config_project, azure_config_project)?;
 
     let client_for_middleware = client.clone();
     let client_with_middleware = rattler_networking::LazyClient::new(move || {
@@ -467,7 +493,7 @@ mod offline_tests {
             ..Default::default()
         };
         let lazy_client = LazyReqwestClient::new(&config).unwrap();
-        let middleware = build_reqwest_middleware_stack(&config, &lazy_client, None).unwrap();
+        let middleware = build_reqwest_middleware_stack(&config, &lazy_client, None, None).unwrap();
         ClientWithMiddleware::new(lazy_client.into_client(), middleware)
     }
 
@@ -513,7 +539,7 @@ mod offline_tests {
 
         let config = Config::default();
         let lazy_client = LazyReqwestClient::new(&config).unwrap();
-        let middleware = build_reqwest_middleware_stack(&config, &lazy_client, None).unwrap();
+        let middleware = build_reqwest_middleware_stack(&config, &lazy_client, None, None).unwrap();
         let client = ClientWithMiddleware::new(lazy_client.into_client(), middleware);
 
         let response = client.get(&url).send().await.unwrap();

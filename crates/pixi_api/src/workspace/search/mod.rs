@@ -15,7 +15,7 @@ pub async fn search(
     let client = if let Some(workspace) = workspace {
         workspace.authenticated_client()?.clone()
     } else {
-        build_lazy_reqwest_clients(Some(&config), None)?.1
+        build_lazy_reqwest_clients(Some(&config), None, None)?.1
     };
 
     let gateway = config.gateway().with_client(client).finish();
