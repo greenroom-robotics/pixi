@@ -11,6 +11,29 @@ exclude = [
   "tests/data",
   "trampoline",
   "pytest-temp",
+  # --- Azure fork divergence ---------------------------------------------
+  # These pixi build-backend crates pin the published rattler-build release
+  # (rattler_build_core 0.2.9), which transitively depends on
+  # `rattler_upload 0.8.3` and thereby EXACT-pins `rattler_conda_types
+  # =0.48.0`. The `[patch.crates-io]` block below redirects the whole
+  # rattler_* surface to the greenroom-robotics fork (for `az://` support),
+  # whose HEAD is at `rattler_conda_types 0.48.1` — one patch version ahead.
+  # The two cannot coexist in a single Cargo.lock (the exact pin has no
+  # satisfying version once conda_types is 0.48.1).
+  #
+  # These backends are built separately (each has its own recipe pinned to a
+  # pre-azure rev) and are NOT part of pixi's fetch/solve/download path, so
+  # excluding them here lets the `pixi` binary build against the azure fork.
+  # To re-include them, bump the rattler-build crates to a release built
+  # against rattler_upload 0.9 / rattler_conda_types 0.48.1.
+  "crates/pixi_build_backend",
+  "crates/pixi_build_cmake",
+  "crates/pixi_build_mojo",
+  "crates/pixi_build_python",
+  "crates/pixi_build_r",
+  "crates/pixi_build_rattler_build",
+  "crates/pixi_build_ros",
+  "crates/pixi_build_rust",
 ]
 members = ["crates/*"]
 resolver = "3"
@@ -245,13 +268,14 @@ rattler_menuinst = { version = "0.2", default-features = false }
 rattler_networking = { version = "0.30", default-features = false, features = [
   "dirs",
   "google-cloud-auth",
+  "azure",
 ] }
 rattler_package_streaming = { version = "0.26", default-features = false }
 rattler_repodata_gateway = { version = "0.30", default-features = false }
 rattler_s3 = { version = "0.2", default-features = false }
 rattler_shell = { version = "0.27", default-features = false }
 rattler_solve = { version = "7.2", default-features = false }
-rattler_upload = { version = "0.8", default-features = false, features = [
+rattler_upload = { version = "0.9", default-features = false, features = [
   "s3",
   "sigstore-sign",
 ] }
@@ -276,6 +300,42 @@ version-ranges = { git = "https://github.com/astral-sh/pubgrub", rev = "d8efd776
 # `http-cache-reqwest`) and consumers that depend on the renamed
 # `astral-reqwest-middleware` (rattler, rattler-build, uv).
 reqwest-middleware = { path = "patches/reqwest_middleware_shim" }
+
+# Redirect the entire rattler_* crate surface to the greenroom-robotics fork,
+# which carries authenticated `az://` Azure Blob channel support behind the
+# `azure` feature (not yet upstream in conda/rattler).
+#
+# The whole surface must be patched, not just the crates we touch directly:
+# rattler's crates share public types (e.g. `RepoDataRecord`,
+# `ChannelConfig`), and if some of those crates resolved from crates.io while
+# others resolved from this git fork, the "same" type would exist twice and
+# fail to unify — a duplicate-symbol mismatch at build time. Pinning every
+# rattler_* crate (plus its siblings `file_url`, `simple_spawn_blocking`,
+# `path_resolver`, `coalesced_map`) to a single git rev keeps one source of
+# truth. See vendor_recipes/rattler-build-gr in ros-recipes for the precedent.
+coalesced_map = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+file_url = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+path_resolver = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_cache = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_conda_types = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_config = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_digest = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_index = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_lock = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_macros = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_menuinst = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_networking = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_package_streaming = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_pty = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_redaction = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_repodata_gateway = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_s3 = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_shell = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_solve = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_upload = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+rattler_virtual_packages = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
+simple_spawn_blocking = { git = "https://github.com/greenroom-robotics/rattler", rev = "79e10ca8d021afa09bacdb4b6cab0d9ace4e1eef" }
 
 # Strip debug info from dependencies: faster links, much smaller `target/`,
 # while keeping full debuggability for our own crates.
