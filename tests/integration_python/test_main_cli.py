@@ -1,5 +1,7 @@
 import json
+import os
 import platform
+import shlex
 import shutil
 import sys
 import tomllib
@@ -561,6 +563,7 @@ def test_dont_add_broken_dep(pixi: Path, tmp_pixi_workspace: Path, dummy_channel
     assert manifest_content == tmp_pixi_workspace.joinpath("pixi.toml").read_text()
 
 
+@pytest.mark.slow
 def test_list_exits_unsuccessful_on_unknown_pkg(
     pixi: Path, tmp_pixi_workspace: Path, dummy_channel_1: str
 ) -> None:
@@ -648,19 +651,28 @@ def test_pixi_lock(pixi: Path, tmp_pixi_workspace: Path, dummy_channel_1: str) -
 
 
 @pytest.mark.extra_slow
-def test_pixi_auth(pixi: Path) -> None:
+def test_pixi_auth(pixi: Path, tmp_path: Path) -> None:
+    # `pixi auth` delegates to rattler, whose only storage override is the
+    # `RATTLER_AUTH_FILE` env var. Point it at a temporary file so the test
+    # uses a file backend instead of the OS keyring, which is unavailable on
+    # headless CI runners (and otherwise fails listing with KeyringStorageError).
+    env = {"RATTLER_AUTH_FILE": str(tmp_path / "auth.json")}
+
     verify_cli_command(
         [pixi, "auth", "login", "--token", "DUMMY_TOKEN", "https://prefix.dev/"],
         expected_exit_code=ExitCode.FAILURE,
         stderr_contains="Unauthorized or invalid token",
+        env=env,
     )
     verify_cli_command(
         [pixi, "auth", "login", "--token", "DUMMY_TOKEN", "https://repo.prefix.dev/"],
         expected_exit_code=ExitCode.FAILURE,
         stderr_contains="Unauthorized or invalid token",
+        env=env,
     )
     verify_cli_command(
-        [pixi, "auth", "login", "--conda-token", "DUMMY_TOKEN", "https://conda.anaconda.org"]
+        [pixi, "auth", "login", "--conda-token", "DUMMY_TOKEN", "https://conda.anaconda.org"],
+        env=env,
     )
     verify_cli_command(
         [
@@ -672,7 +684,8 @@ def test_pixi_auth(pixi: Path) -> None:
             "--password",
             "DUMMY_PASS",
             "https://host.org",
-        ]
+        ],
+        env=env,
     )
     verify_cli_command(
         [
@@ -686,14 +699,27 @@ def test_pixi_auth(pixi: Path) -> None:
             "--s3-session-token",
             "DUMMY_TOKEN",
             "s3://amazon-aws.com",
-        ]
+        ],
+        env=env,
     )
 
-    verify_cli_command([pixi, "auth", "logout", "https://prefix.dev/"])
-    verify_cli_command([pixi, "auth", "logout", "https://repo.prefix.dev/"])
-    verify_cli_command([pixi, "auth", "logout", "https://conda.anaconda.org"])
-    verify_cli_command([pixi, "auth", "logout", "https://host.org"])
-    verify_cli_command([pixi, "auth", "logout", "s3://amazon-aws.com"])
+    # The token logins above were rejected (invalid token, validated online), so
+    # nothing was stored for these hosts and logging out reports no credentials.
+    verify_cli_command(
+        [pixi, "auth", "logout", "https://prefix.dev/"],
+        expected_exit_code=ExitCode.FAILURE,
+        stderr_contains="No stored credentials found",
+        env=env,
+    )
+    verify_cli_command(
+        [pixi, "auth", "logout", "https://repo.prefix.dev/"],
+        expected_exit_code=ExitCode.FAILURE,
+        stderr_contains="No stored credentials found",
+        env=env,
+    )
+    verify_cli_command([pixi, "auth", "logout", "https://conda.anaconda.org"], env=env)
+    verify_cli_command([pixi, "auth", "logout", "https://host.org"], env=env)
+    verify_cli_command([pixi, "auth", "logout", "s3://amazon-aws.com"], env=env)
 
 
 @pytest.mark.extra_slow
@@ -791,7 +817,7 @@ def test_dont_error_on_missing_platform(pixi: Path, tmp_pixi_workspace: Path) ->
     # This should not error, but should spawn a warning with a helping message.
     verify_cli_command(
         [pixi, "install", "--manifest-path", manifest],
-        stderr_contains=["pixi project platform add zos-z"],
+        stderr_contains=["pixi workspace platform add zos-z"],
     )
 
 
@@ -826,7 +852,7 @@ def test_shell_hook_autocompletion(pixi: Path, tmp_pixi_workspace: Path) -> None
         tmp_pixi_workspace.joinpath(bash_comp_dir, "pixi.sh").touch()
         verify_cli_command(
             [pixi, "shell-hook", "--manifest-path", manifest, "--shell", "bash"],
-            stdout_contains=["source", "share/bash-completion/completions"],
+            stdout_contains=["_pixi_f", "share/bash-completion/completions"],
         )
 
         zsh_comp_dir = ".pixi/envs/default/share/zsh/site-functions"
@@ -844,6 +870,74 @@ def test_shell_hook_autocompletion(pixi: Path, tmp_pixi_workspace: Path) -> None
             [pixi, "shell-hook", "--manifest-path", manifest, "--shell", "fish"],
             stdout_contains=["for file in", "source", "share/fish/vendor_completions.d"],
         )
+
+
+@pytest.mark.skipif(platform.system() == "Windows", reason="requires bash")
+def test_bash_run_task_completion(pixi: Path, tmp_pixi_workspace: Path) -> None:
+    manifest = tmp_pixi_workspace.joinpath("pixi.toml")
+    # An explicit multi-platform list (always including the current platform)
+    # keeps the platform-completion assertions deterministic across machines.
+    toml = """
+        [workspace]
+        name = "test"
+        channels = []
+        platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+
+        [tasks]
+        hello = "echo hello"
+        build = "echo build"
+
+        [feature.test.tasks]
+        run-tests = "echo testing"
+
+        [environments]
+        test = ["test"]
+        """
+    manifest.write_text(toml)
+
+    def complete(command_line: list[str]) -> list[str]:
+        """Simulate pressing <TAB> in bash with the given words on the command line."""
+        words = " ".join(shlex.quote(word) for word in command_line)
+        harness = "\n".join(
+            [
+                f'eval "$({shlex.quote(str(pixi))} completion --shell bash)"',
+                f"COMP_WORDS=({words})",
+                "COMP_CWORD=$((${#COMP_WORDS[@]} - 1))",
+                "COMPREPLY=()",
+                '_pixi pixi "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD - 1]}"',
+                'echo "${COMPREPLY[@]:-}"',
+            ]
+        )
+        # The completion script invokes bare `pixi task list` and
+        # `pixi workspace environment list`, so the binary under test must be
+        # first on PATH.
+        output = verify_cli_command(
+            ["bash", "-c", harness],
+            env={"PATH": f"{pixi.parent.resolve()}{os.pathsep}{os.environ['PATH']}"},
+            cwd=tmp_pixi_workspace,
+        )
+        return sorted(output.stdout.split())
+
+    all_tasks = ["build", "hello", "run-tests"]
+    assert complete(["pixi", "run", ""]) == all_tasks
+    # Tasks must also complete after flags (https://github.com/prefix-dev/pixi/issues/6494).
+    assert complete(["pixi", "run", "-e", "test", ""]) == all_tasks
+    assert complete(["pixi", "run", "--frozen", ""]) == all_tasks
+    assert complete(["pixi", "run", "-e", "test", "he"]) == ["hello"]
+    # Flags still complete.
+    assert complete(["pixi", "run", "--froz"]) == ["--frozen"]
+
+    # `-e`/`--environment` complete environment names instead of file paths.
+    all_environments = ["default", "test"]
+    assert complete(["pixi", "run", "-e", ""]) == all_environments
+    assert complete(["pixi", "run", "--environment", ""]) == all_environments
+    assert complete(["pixi", "run", "-e", "te"]) == ["test"]
+
+    # `-p`/`--platform` complete platform names instead of file paths.
+    all_platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+    assert complete(["pixi", "run", "-p", ""]) == all_platforms
+    assert complete(["pixi", "run", "--platform", ""]) == all_platforms
+    assert complete(["pixi", "run", "-p", "osx"]) == ["osx-64", "osx-arm64"]
 
 
 def test_pixi_info_tasks(pixi: Path, tmp_pixi_workspace: Path) -> None:
@@ -998,6 +1092,7 @@ def test_pixi_task_list_json(pixi: Path, tmp_pixi_workspace: Path) -> None:
         [
             {
                 "environment": "default",
+                "tasks": [],
                 "features": [
                     {
                         "name": "default",
@@ -1489,3 +1584,90 @@ def test_add_url_no_channel(pixi: Path, tmp_pixi_workspace: Path) -> None:
         ],
         stderr_contains="The prefix environment has been installed",
     )
+
+
+def test_add_to_unused_feature_warns(
+    pixi: Path, tmp_pixi_workspace: Path, multiple_versions_channel_1: str
+) -> None:
+    manifest_path = tmp_pixi_workspace / "pixi.toml"
+    verify_cli_command([pixi, "init", "--channel", multiple_versions_channel_1, tmp_pixi_workspace])
+
+    # The feature is not part of any environment, so the dependency cannot be
+    # pinned to a solved version and stays `*`.
+    verify_cli_command(
+        [pixi, "add", "--manifest-path", manifest_path, "--feature", "test", "package"],
+        stderr_contains=[
+            "not used in any environment",
+            "pixi workspace environment add <environment> --feature test",
+            "pixi upgrade --feature test package",
+        ],
+    )
+    parsed_manifest = tomllib.loads(manifest_path.read_text())
+    assert parsed_manifest["feature"]["test"]["dependencies"]["package"] == "*"
+
+    # Once the feature is part of an environment, the dependency is pinned and
+    # no warning is shown.
+    verify_cli_command(
+        [
+            pixi,
+            "workspace",
+            "environment",
+            "add",
+            "--manifest-path",
+            manifest_path,
+            "test-env",
+            "--feature",
+            "test",
+        ],
+    )
+    verify_cli_command(
+        [pixi, "add", "--manifest-path", manifest_path, "--feature", "test", "package2"],
+        stderr_excludes="not used in any environment",
+    )
+    parsed_manifest = tomllib.loads(manifest_path.read_text())
+    assert parsed_manifest["feature"]["test"]["dependencies"]["package2"] == ">=0.2.0,<0.3"
+
+    # Following the suggested upgrade command pins the wildcard dependency.
+    verify_cli_command(
+        [pixi, "upgrade", "--manifest-path", manifest_path, "--feature", "test", "package"],
+    )
+    parsed_manifest = tomllib.loads(manifest_path.read_text())
+    assert parsed_manifest["feature"]["test"]["dependencies"]["package"] == ">=0.2.0,<0.3"
+
+
+def test_workspace_environment_add_skips_unused_feature_warning(
+    pixi: Path, tmp_pixi_workspace: Path, dummy_channel_1: str
+) -> None:
+    manifest_path = tmp_pixi_workspace / "pixi.toml"
+    verify_cli_command([pixi, "init", "--channel", dummy_channel_1, tmp_pixi_workspace])
+    manifest_path.write_text(
+        manifest_path.read_text()
+        + """
+[feature.test.dependencies]
+dummy-a = "*"
+"""
+    )
+
+    # Other commands warn about the unused feature...
+    verify_cli_command(
+        [pixi, "workspace", "environment", "list", "--manifest-path", manifest_path],
+        stderr_contains="not used in any environment",
+    )
+
+    # ...but the command that puts the feature into an environment does not.
+    verify_cli_command(
+        [
+            pixi,
+            "workspace",
+            "environment",
+            "add",
+            "--manifest-path",
+            manifest_path,
+            "test-env",
+            "--feature",
+            "test",
+        ],
+        stderr_excludes="not used in any environment",
+    )
+    parsed_manifest = tomllib.loads(manifest_path.read_text())
+    assert parsed_manifest["environments"]["test-env"] == ["test"]

@@ -2787,6 +2787,102 @@ my-package = {{ path = "./my-package" }}
     );
 }
 
+/// A changed source package must be rebuilt by quick-validating commands
+/// (`pixi run` / `pixi shell`) when the workspace declares a rich platform
+/// (e.g. one with CUDA virtual packages). The lock file keys such a platform
+/// by its custom name, and the [`UpdateMode::QuickValidate`] guard that
+/// disables the lock-file-hash short-circuit for source packages used to look
+/// the row up by the bare subdir name, silently turning itself off.
+/// Linux-only: the rich platform declares a `__linux` kernel floor.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn quick_validate_rebuilds_changed_source_package_on_rich_platform() {
+    use pixi_core::{
+        InstallFilter, UpdateLockFileOptions,
+        lock_file::{ReinstallPackages, UpdateMode},
+    };
+
+    setup_tracing();
+
+    let (instantiator, mut observer) =
+        ObservableBackend::instantiator(PassthroughBackend::instantiator());
+    let pixi = PixiControl::new()
+        .unwrap()
+        .with_backend_override(BackendOverride::from_memory(instantiator));
+
+    let source_dir = pixi.workspace_path().join("my-package");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::write(
+        source_dir.join("pixi.toml"),
+        r#"
+[package]
+name = "my-package"
+version = "0.0.0"
+
+[package.build]
+backend = { name = "in-memory", version = "0.1.0" }
+
+[package.build.config]
+build-globs = ["*.cu"]
+"#,
+    )
+    .unwrap();
+    fs::write(source_dir.join("main.cu"), "// v1").unwrap();
+
+    fs::write(
+        pixi.manifest_path(),
+        format!(
+            r#"
+[workspace]
+channels = []
+platforms = [{{ name = "gpu", platform = "{}", linux = "4.18" }}]
+preview = ["pixi-build"]
+
+[dependencies]
+my-package = {{ path = "./my-package" }}
+"#,
+            Platform::current()
+        ),
+    )
+    .unwrap();
+
+    pixi.install().await.unwrap();
+    assert_eq!(
+        count_build_events(&observer.events()),
+        1,
+        "the initial install should build the source package once"
+    );
+
+    // Change a source file matched by the build globs; the lock file (and
+    // thus its hash) stays unchanged.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    fs::write(source_dir.join("main.cu"), "// v2").unwrap();
+
+    // Drive the quick-validate path the way `pixi run` does.
+    let workspace = pixi.workspace().unwrap();
+    let environment = workspace.default_environment();
+    let lock_file = workspace
+        .update_lock_file(None, UpdateLockFileOptions::default())
+        .await
+        .unwrap()
+        .0;
+    lock_file
+        .prefix(
+            &environment,
+            UpdateMode::QuickValidate,
+            &ReinstallPackages::default(),
+            &InstallFilter::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        count_build_events(&observer.events()),
+        1,
+        "quick validation must rebuild the changed source package"
+    );
+}
+
 fn simple_package_manifest(platform: Platform) -> String {
     format!(
         r#"
@@ -3097,7 +3193,7 @@ async fn test_package_extras_select_per_environment_in_solve_group() {
     package_database.add_package(Package::build("dep-bar", "1.0.0").finish());
 
     let mut my_package = Package::build("my-package", "1.0.0").finish();
-    my_package.package_record.experimental_extra_depends = std::collections::BTreeMap::from([
+    my_package.package_record.extra_depends = std::collections::BTreeMap::from([
         ("foo".to_string(), vec!["dep-foo".to_string()]),
         ("bar".to_string(), vec!["dep-bar".to_string()]),
     ]);
@@ -3196,7 +3292,7 @@ async fn test_package_extras_lock_file_is_satisfiable() {
     package_database.add_package(Package::build("dep-bar", "1.0.0").finish());
 
     let mut my_package = Package::build("my-package", "1.0.0").finish();
-    my_package.package_record.experimental_extra_depends = std::collections::BTreeMap::from([
+    my_package.package_record.extra_depends = std::collections::BTreeMap::from([
         ("foo".to_string(), vec!["dep-foo".to_string()]),
         ("bar".to_string(), vec!["dep-bar".to_string()]),
     ]);
@@ -3287,10 +3383,7 @@ bat = { version = "*", when = { package = "python", version = ">=3.10" } }
         .find(|r| r.repodata_record.package_record.name.as_normalized() == "my-package")
         .expect("my-package should be installed");
 
-    let extras = &my_package
-        .repodata_record
-        .package_record
-        .experimental_extra_depends;
+    let extras = &my_package.repodata_record.package_record.extra_depends;
     let test_group = extras
         .get("test")
         .expect("built package must record the `test` extra group");
@@ -3302,4 +3395,77 @@ bat = { version = "*", when = { package = "python", version = ">=3.10" } }
         test_group.iter().any(|spec| spec.contains("when=")),
         "conditional extra dependency must preserve its `when=` clause, got {test_group:?}"
     );
+}
+
+/// Regression test for <https://github.com/prefix-dev/pixi/issues/6445>: a host
+/// dependency change re-solves the lock file without touching the run
+/// environment, so `--check`/`--dry-run` must not rely on `LockFileDiff`.
+#[tokio::test]
+async fn test_lock_check_detects_host_dependency_change() {
+    setup_tracing();
+
+    // Host-only dependency, no run-exports, so its version never reaches the run
+    // environment -- the case the diff is blind to.
+    let mut package_database = MockRepoData::default();
+    package_database.add_package(Package::build("bar", "1").finish());
+    package_database.add_package(Package::build("bar", "2").finish());
+    let channel = package_database.into_channel().await.unwrap();
+
+    let pixi = PixiControl::new()
+        .unwrap()
+        .with_backend_override(BackendOverride::from_memory(
+            PassthroughBackend::instantiator(),
+        ));
+
+    let source_dir = pixi.workspace_path().join("my-package");
+    fs::create_dir_all(&source_dir).unwrap();
+    let write_host_dep = |version: &str| {
+        fs::write(
+            source_dir.join("pixi.toml"),
+            format!(
+                r#"
+[package]
+name = "my-package"
+version = "1.0.0"
+[package.build]
+backend = {{ name = "in-memory", version = "0.1.0" }}
+[package.host-dependencies]
+bar = "=={version}"
+"#
+            ),
+        )
+        .unwrap();
+    };
+    write_host_dep("1");
+    pixi.update_manifest(&format!(
+        r#"
+[workspace]
+channels = ["{channel}"]
+platforms = ["{platform}"]
+preview = ["pixi-build"]
+[dependencies]
+my-package = {{ path = "./my-package" }}
+"#,
+        channel = channel.url(),
+        platform = Platform::current(),
+    ))
+    .unwrap();
+    pixi.lock().await.unwrap();
+
+    // Unchanged manifest: check passes (no false positive).
+    pixi.lock()
+        .with_check(true)
+        .with_dry_run(true)
+        .await
+        .unwrap();
+
+    // Bumped host dependency: check must now fail as out-of-date.
+    write_host_dep("2");
+    let err = pixi
+        .lock()
+        .with_check(true)
+        .with_dry_run(true)
+        .await
+        .expect_err("`pixi lock --check --dry-run` must fail when a host dependency changed");
+    assert!(format_diagnostic(err.as_ref()).contains("not up-to-date"));
 }

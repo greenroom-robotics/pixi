@@ -86,6 +86,11 @@ pub struct SourceBuildSpec {
     /// Folds into the artifact cache key but not the workspace key, so
     /// different formats share build state but get distinct artifacts.
     pub package_format: Option<CondaPackageFormat>,
+
+    /// Inline package definition for this source. Repopulated from
+    /// the consuming manifest by the installer; when set, the backend is built
+    /// from it instead of discovering a manifest in the checkout.
+    pub inline: Option<crate::InlinePackage>,
 }
 
 /// Built artifact plus its sha256 and a
@@ -174,6 +179,7 @@ async fn compute_inner(
         manifest_checkout.path.as_std_path(),
         manifest_anchor.clone(),
         spec.exclude_newer.clone(),
+        spec.inline.as_ref(),
     )
     .await
     .map_err(|err: Arc<crate::InstantiateBackendError>| {
@@ -195,6 +201,7 @@ async fn compute_inner(
         &host_source_dep_sha256s,
         &project_model_overrides,
         spec.package_format,
+        spec.inline.as_ref().map(|inline| inline.content_hash),
     );
 
     // On artifact cache hit, return without invoking the backend.
@@ -236,7 +243,8 @@ async fn compute_inner(
                 build_source_dir,
                 spec.exclude_newer.clone(),
             )
-            .with_project_model_overrides(project_model_overrides),
+            .with_project_model_overrides(project_model_overrides)
+            .with_inline(spec.inline.clone()),
         )
         .await
         .map_err(|err: Arc<crate::InstantiateBackendError>| {
@@ -365,8 +373,9 @@ async fn compute_inner(
         .transpose()
         .map_err(SourceBuildError::from)?
         .unwrap_or_default()
-        // Apply strong build run-exports to host so the host env's
-        // run-export extraction sees them as direct dependencies.
+        // Apply strong build run-exports to host so they are part of the
+        // host env solve. They stay marked as run-export-sourced, so the
+        // extraction below does not treat them as direct dependencies.
         .extend_with_run_exports_from_build(&build_run_exports);
 
     let host_run_exports = host_dependencies
@@ -535,6 +544,9 @@ async fn build_source_deps(
                 // Nested source deps are unpacked into the parent's
                 // prefix immediately; use the cheapest compression.
                 package_format: Some(CondaPackageFormat::fast()),
+                // A nested source dependency carries its own on-disk manifest;
+                // inline definitions apply only to the consumer's direct deps.
+                inline: None,
             };
             let result = sub_ctx.compute(&SourceBuildKey::new(nested_spec)).await?;
             Ok(result.artifact_sha256)
@@ -662,6 +674,9 @@ async fn install_prefix(
         channels: spec.channels.clone(),
         variant_configuration: spec.variant_configuration.clone(),
         variant_files: spec.variant_files.clone(),
+        // Build/host environments install pre-built packages; no inline
+        // definitions apply here.
+        inline_packages: Default::default(),
     };
     let result = ctx
         .install_pixi_environment(install_spec)

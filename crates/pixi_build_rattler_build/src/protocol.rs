@@ -476,7 +476,7 @@ impl Protocol for RattlerBuildBackend {
                 channels: vec![],
                 channel_priority: Default::default(),
                 solve_strategy: Default::default(),
-                timestamp: chrono::Utc::now(),
+                timestamp: jiff::Timestamp::now(),
                 subpackages: BTreeMap::new(),
                 packaging_settings: PackagingSettings::from_args(
                     params
@@ -707,8 +707,8 @@ impl ProtocolInstantiator for RattlerBuildBackendInstantiator {
                 extract_workspace_deps(default_target, &mut workspace_dependencies)?;
             }
 
-            if let Some(targets) = target.targets {
-                for (_, target) in targets {
+            if let Some(conditional) = target.conditional {
+                for (_, target) in conditional {
                     extract_workspace_deps(target, &mut workspace_dependencies)?;
                 }
             }

@@ -66,6 +66,10 @@ pub enum SpecConversionError {
     /// The `name` field is missing in the spec.
     #[error("the `package.name` must be provided in versions of pixi-build-api-version <2")]
     MissingName,
+
+    /// A wildcard platform glob was used in a package target selector.
+    #[error("wildcard target selector '{0}' is not supported in package targets")]
+    WildcardTargetSelector(String),
 }
 
 /// A package specification for pixi.
@@ -1147,7 +1151,7 @@ mod test {
                 "python >=3.12",
                 ParseMatchSpecOptions::lenient()
                     .with_repodata_revision(RepodataRevision::V3)
-                    .with_experimental_conditionals(true),
+                    .with_conditionals(true),
             )
             .unwrap(),
         ));

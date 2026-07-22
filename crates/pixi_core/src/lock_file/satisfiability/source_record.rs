@@ -95,6 +95,30 @@ pub(super) fn verify_build_source_matches_manifest(
     }
 }
 
+/// Verify that an immutable source record's identity hash still matches the
+/// value it was locked with.
+///
+/// The lock file does not carry the inline package definition itself; its
+/// content hash is folded into the record's `identifier_hash` at solve time.
+/// Every other hash input round-trips verbatim through the lock file, so
+/// recomputing the hash with the *current* manifest's inline content hash
+/// reproduces the stored value exactly when the inline definition is
+/// unchanged (or absent on both sides). A mismatch means the inline table
+/// was edited, added, or removed - or the stored hash was produced by a
+/// different pixi version with another algorithm - and the record must be
+/// re-resolved.
+pub(super) fn verify_immutable_record_identity(
+    record: &pixi_record::UnresolvedSourceRecord,
+    current_inline_hash: Option<u64>,
+) -> Result<(), Box<PlatformUnsat>> {
+    if record.compute_identifier_hash(current_inline_hash) != record.identifier_hash {
+        return Err(Box::new(PlatformUnsat::SourcePackageIdentityChanged {
+            package: record.name().as_source().to_string(),
+        }));
+    }
+    Ok(())
+}
+
 /// Verify that the locked build/host packages of a partial / mutable
 /// source record still satisfy the build backend's declared specs for
 /// the matching output, then return a freshly-assembled full source
@@ -113,6 +137,19 @@ pub(super) async fn verify_partial_source_record_against_backend(
 
     let pkg_name = record.name().clone();
 
+    // Look up this package's inline definition from the current
+    // manifest, if any. It is needed both to re-query metadata without an
+    // on-disk manifest and so an edit to the inline table re-derives different
+    // outputs (forcing a re-lock).
+    let pixi_platform = pixi_manifest::HasWorkspaceManifest::workspace_manifest(ctx.environment)
+        .workspace
+        .platform_by_name(&ctx.platform);
+    let inline =
+        crate::workspace::grouped_environment::GroupedEnvironment::from(ctx.environment.clone())
+            .combined_inline_packages(pixi_platform)
+            .get(&pkg_name)
+            .cloned();
+
     // Query fresh backend metadata for the source's manifest checkout.
     let backend_metadata = ctx
         .command_dispatcher
@@ -127,6 +164,7 @@ pub(super) async fn verify_partial_source_record_against_backend(
             ),
             build_string_prefix: None,
             build_number: None,
+            inline: inline.clone(),
         })
         .await
         .map_err(|e| match e {
@@ -416,9 +454,12 @@ fn collect_direct_run_exports(
         if !direct_names.contains(name) || ignore.from_package.contains(name) {
             continue;
         }
+        // Read run-exports off both binary and (full) source records,
+        // mirroring the solve path's `extract_run_exports`; partial source
+        // records have no package record and thus contribute nothing.
         let Some(re_json) = record
-            .as_binary()
-            .and_then(|b| b.package_record.run_exports.as_ref())
+            .package_record()
+            .and_then(|pr| pr.run_exports.as_ref())
         else {
             continue;
         };
@@ -822,8 +863,8 @@ fn build_full_source_record_from_output(
         // `depends`/`constrains` are taken from the lock above. `output`'s
         // extras are unresolved (source specs are not yet pinned), so deriving
         // them here would drop the resolution the original solve produced.
-        experimental_extra_depends: match &record.data {
-            SourceRecordData::Full(full) => full.package_record.experimental_extra_depends.clone(),
+        extra_depends: match &record.data {
+            SourceRecordData::Full(full) => full.package_record.extra_depends.clone(),
             SourceRecordData::Partial(partial) => partial.experimental_extra_depends.clone(),
         },
         flags: output.metadata.flags.clone(),
@@ -854,7 +895,7 @@ mod tests {
     use super::super::BuildOrHostEnv;
     use super::{
         build_full_source_record_from_output, variants_equivalent,
-        verify_locked_against_backend_specs,
+        verify_immutable_record_identity, verify_locked_against_backend_specs,
     };
     use pixi_build_types::{
         BinaryPackageSpec, ExtraGroupName, NamedSpec, PackageSpec, PinCompatibleSpec,
@@ -871,7 +912,8 @@ mod tests {
     use pixi_spec::{SourceAnchor, SourceSpec};
     use rattler_conda_types::{
         ChannelConfig, NoArchType, PackageName, PackageRecord, Platform, RepoDataRecord,
-        VersionSpec, VersionWithSource, package::DistArchiveIdentifier,
+        VersionSpec, VersionWithSource,
+        package::{DistArchiveIdentifier, RunExportsJson},
     };
     use std::{
         collections::BTreeMap,
@@ -1402,6 +1444,36 @@ mod tests {
         assert_eq!(diff.removed, vec!["a >=1".to_string()]);
     }
 
+    /// The identifier hash of an immutable record folds in the content hash
+    /// of the inline package definition it was resolved with (or `None`).
+    /// Verification recomputes the hash with the definition currently in the
+    /// manifest, so any add / edit / removal of the inline table must
+    /// surface as unsat while an unchanged definition passes.
+    #[test]
+    fn immutable_inline_definition_change_is_detected() {
+        let record_with_inline_hash = |inline_content_hash: Option<u64>| {
+            let partial = make_partial_source_record("pkg", "./pkg", Vec::new(), Vec::new());
+            UnresolvedSourceRecord::new(
+                partial.data,
+                partial.manifest_source,
+                partial.build_source,
+                partial.variants,
+                Vec::new(),
+                Vec::new(),
+                inline_content_hash,
+            )
+        };
+
+        let with_inline = record_with_inline_hash(Some(42));
+        assert!(verify_immutable_record_identity(&with_inline, Some(42)).is_ok());
+        assert!(verify_immutable_record_identity(&with_inline, Some(43)).is_err());
+        assert!(verify_immutable_record_identity(&with_inline, None).is_err());
+
+        let without_inline = record_with_inline_hash(None);
+        assert!(verify_immutable_record_identity(&without_inline, None).is_ok());
+        assert!(verify_immutable_record_identity(&without_inline, Some(42)).is_err());
+    }
+
     /// Build a Full source record with the supplied `depends` and
     /// `constrains` strings. Build/host packages are empty, which
     /// is enough for the constrains-only test cases below.
@@ -1540,6 +1612,101 @@ mod tests {
         }
     }
 
+    /// Build a binary record carrying run-exports, for the run-export
+    /// chain tests below.
+    fn make_binary_record_with_run_exports(
+        name: &str,
+        version: &str,
+        run_exports: RunExportsJson,
+    ) -> RepoDataRecord {
+        let mut record = make_binary_record(name, version);
+        record.package_record.run_exports = Some(run_exports);
+        record
+    }
+
+    /// The run-dep reconstruction only collects run-exports from
+    /// backend-declared dependencies. A package that reached the host env
+    /// through a build dep's strong run-export (gxx -> libstdcxx-ng) does
+    /// not contribute its own run-exports, matching the solve path and
+    /// rattler-build. A lock produced by that solve must verify clean.
+    #[test]
+    fn verify_locked_run_deps_ignores_run_export_injected_host_packages() {
+        let mut record =
+            make_full_source_record("pkg", vec!["libstdcxx-ng >=12".to_string()], Vec::new());
+        record.build_packages = vec![UnresolvedPixiRecord::Binary(Arc::new(
+            make_binary_record_with_run_exports(
+                "gxx_linux-64",
+                "11.4.0",
+                RunExportsJson {
+                    strong: vec!["libstdcxx-ng >=12".to_string()],
+                    ..Default::default()
+                },
+            ),
+        ))];
+        record.host_packages = vec![UnresolvedPixiRecord::Binary(Arc::new(
+            make_binary_record_with_run_exports(
+                "libstdcxx-ng",
+                "15.2.0",
+                RunExportsJson {
+                    strong: vec!["libstdcxx".to_string()],
+                    ..Default::default()
+                },
+            ),
+        ))];
+        let output = make_conda_output("pkg", vec![binary_dep("gxx_linux-64", "")]);
+
+        let result = verify_locked_run_deps_against_backend(&record, &output, &CHANNEL_CONFIG);
+        assert!(result.is_ok(), "expected no drift: {result:?}");
+    }
+
+    /// A lock written by pixi versions that chained run-exports carries the
+    /// injected package's exports (`libstdcxx *`) in `depends`. Those must
+    /// surface as drift so the lock is regenerated once (#6584).
+    #[test]
+    fn verify_locked_run_deps_rejects_chained_run_exports() {
+        let mut record = make_full_source_record(
+            "pkg",
+            vec!["libstdcxx-ng >=12".to_string(), "libstdcxx *".to_string()],
+            Vec::new(),
+        );
+        record.build_packages = vec![UnresolvedPixiRecord::Binary(Arc::new(
+            make_binary_record_with_run_exports(
+                "gxx_linux-64",
+                "11.4.0",
+                RunExportsJson {
+                    strong: vec!["libstdcxx-ng >=12".to_string()],
+                    ..Default::default()
+                },
+            ),
+        ))];
+        record.host_packages = vec![UnresolvedPixiRecord::Binary(Arc::new(
+            make_binary_record_with_run_exports(
+                "libstdcxx-ng",
+                "15.2.0",
+                RunExportsJson {
+                    strong: vec!["libstdcxx".to_string()],
+                    ..Default::default()
+                },
+            ),
+        ))];
+        let output = make_conda_output("pkg", vec![binary_dep("gxx_linux-64", "")]);
+
+        let err = verify_locked_run_deps_against_backend(&record, &output, &CHANNEL_CONFIG)
+            .expect_err("a chained run-export in the lock must surface as drift");
+        match *err {
+            super::super::PlatformUnsat::SourceRunDependenciesChanged {
+                kind: SourceRunDepKind::RunDepends,
+                added,
+                removed,
+                ..
+            } => {
+                assert!(added.is_empty());
+                assert_eq!(removed, vec!["libstdcxx *".to_string()]);
+            }
+            other => panic!("expected RunDepends drift, got: {other}"),
+        }
+    }
+
     /// Build an `extra_dependencies` map carrying a single group.
     fn extra_group(
         group: &str,
@@ -1556,7 +1723,7 @@ mod tests {
     fn verify_locked_run_deps_passes_when_extras_match() {
         let mut record = make_full_source_record("pkg", Vec::new(), Vec::new());
         if let SourceRecordData::Full(full) = &mut record.data {
-            full.package_record.experimental_extra_depends =
+            full.package_record.extra_depends =
                 BTreeMap::from([("test".to_string(), vec!["extra-pkg >=1".to_string()])]);
         }
         let mut output = make_conda_output_with_run_deps("pkg", Vec::new(), Vec::new());
@@ -1598,7 +1765,7 @@ mod tests {
     fn verify_locked_run_deps_detects_extra_group_removal() {
         let mut record = make_full_source_record("pkg", Vec::new(), Vec::new());
         if let SourceRecordData::Full(full) = &mut record.data {
-            full.package_record.experimental_extra_depends =
+            full.package_record.extra_depends =
                 BTreeMap::from([("test".to_string(), vec!["extra-pkg >=1".to_string()])]);
         }
         let output = make_conda_output_with_run_deps("pkg", Vec::new(), Vec::new());
@@ -1627,7 +1794,7 @@ mod tests {
     fn verify_locked_run_deps_detects_extra_spec_change() {
         let mut record = make_full_source_record("pkg", Vec::new(), Vec::new());
         if let SourceRecordData::Full(full) = &mut record.data {
-            full.package_record.experimental_extra_depends =
+            full.package_record.extra_depends =
                 BTreeMap::from([("test".to_string(), vec!["extra-pkg >=1".to_string()])]);
         }
         let mut output = make_conda_output_with_run_deps("pkg", Vec::new(), Vec::new());
