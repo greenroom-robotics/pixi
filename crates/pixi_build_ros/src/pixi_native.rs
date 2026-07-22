@@ -96,7 +96,7 @@ fn infer_distro_from_model(model: &ProjectModel) -> Result<String, PixiNativeErr
         if let Some(default_target) = &targets.default_target {
             collect_distros_from_target(default_target, &mut found);
         }
-        if let Some(platform_targets) = &targets.targets {
+        if let Some(platform_targets) = &targets.conditional {
             for target in platform_targets.values() {
                 collect_distros_from_target(target, &mut found);
             }

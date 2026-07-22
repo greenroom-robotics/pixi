@@ -50,7 +50,7 @@ use pixi_uv_conversions::{
 use pypi_mapping::{self, PurlDerivationClient};
 use pypi_modifiers::pypi_marker_env::determine_marker_environment;
 use rattler::package_cache::PackageCache;
-use rattler_conda_types::{Arch, GenericVirtualPackage, PackageName, ParseChannelError, Platform};
+use rattler_conda_types::{Arch, GenericVirtualPackage, PackageName, ParseChannelError};
 use rattler_lock::{LockFile, LockedPackage, ParseCondaLockError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -62,7 +62,7 @@ use uv_normalize::ExtraName;
 use super::{
     CondaPrefixUpdater, InstallSubset, PixiRecordsByName, PypiRecordsByName,
     UnresolvedPixiRecordsByName, outdated::OutdatedEnvironments, resolve_lock_platform,
-    utils::IoConcurrencyLimit,
+    resolve_lock_platform_for, utils::IoConcurrencyLimit,
 };
 use crate::{
     Workspace,
@@ -856,16 +856,21 @@ impl<'p> LockFileDerivedData<'p> {
         };
 
         if environment_file.environment_lock_file_hash == *hash {
-            // If we contain source packages from conda or PyPI we update the prefix by
-            // default
-            let contains_conda_source_pkgs = self.lock_file.environments().any(|(_, env)| {
-                self.lock_file
-                    .platform(&Platform::current().to_string())
-                    .and_then(|p| env.conda_packages(p))
-                    .is_some_and(|mut packages| {
-                        packages.any(|package| package.as_source().is_some())
-                    })
-            });
+            // If the environment contains source packages the hash alone can't
+            // prove freshness, so update the prefix by default. Resolve the lock
+            // row like an install would: rich platforms (e.g. one declaring CUDA)
+            // are keyed by their custom name, not the bare subdir.
+            let contains_conda_source_pkgs = self
+                .lock_file
+                .environment(environment.name().as_str())
+                .is_some_and(|env| {
+                    self.install_platform(environment)
+                        .and_then(|platform| resolve_lock_platform_for(&self.lock_file, platform))
+                        .and_then(|platform| env.conda_packages(platform))
+                        .is_some_and(|mut packages| {
+                            packages.any(|package| package.as_source().is_some())
+                        })
+                });
 
             // Check if we have source packages from PyPI
             // that is a directory, this is basically the only kind of source dependency
@@ -1163,14 +1168,16 @@ impl<'p> LockFileDerivedData<'p> {
             .get_or_try_init(async {
                 // Create object to update the prefix
                 let group = GroupedEnvironment::Environment(environment.clone());
-                let pixi_platform = environment
-                    .named_or_best_declared_platform(self.target_platform.as_ref())
-                    .ok_or_else(|| {
-                        miette::miette!(
-                            "no platform supported by environment '{}' matches the current system",
-                            environment.name().fancy_display()
-                        )
-                    })?;
+                // Mirror `update_prefix`: fall back to the minimum-compatible
+                // platform so an unsatisfied but unused system-requirement (e.g.
+                // a `cuda` requirement no locked package needs) doesn't block the
+                // install.
+                let pixi_platform = self.install_platform(environment).ok_or_else(|| {
+                    miette::miette!(
+                        "no platform supported by environment '{}' matches the current system",
+                        environment.name().fancy_display()
+                    )
+                })?;
 
                 // Use cached conda_prefix_updater if available, otherwise create new
                 let cache_key = lock_file::outdated::BuildCacheKey::new(
@@ -1215,7 +1222,7 @@ impl<'p> LockFileDerivedData<'p> {
                     Vec::new()
                 };
                 // Convert locked packages to unresolved records. Partial
-                // source records are NOT resolved here — they are passed
+                // source records are NOT resolved here -- they are passed
                 // directly to the installer which builds them using
                 // variant-based output matching.
                 let resolver = self.resolver()?;
@@ -1304,7 +1311,7 @@ impl PackageFilterNames {
             &filter.skip_direct,
             &filter.target_packages,
         );
-        let lock_platform = environment.lock_file().platform(platform.name().as_str());
+        let lock_platform = resolve_lock_platform_for(environment.lock_file(), platform);
         let filtered = subset
             .filter(lock_platform.and_then(|p| environment.packages(p)))
             .ok()?;
@@ -1365,12 +1372,12 @@ fn warn_unknown_requested_extras(
         for (_, packages) in locked_environment.conda_packages_by_platform() {
             for package in packages {
                 let extra_keys: Vec<String> = if let Some(record) = package.record() {
-                    record.experimental_extra_depends.keys().cloned().collect()
+                    record.extra_depends.keys().cloned().collect()
                 } else if let Some(partial) = package
                     .as_source()
                     .and_then(|source| source.metadata.as_partial())
                 {
-                    partial.experimental_extra_depends.keys().cloned().collect()
+                    partial.extra_depends.keys().cloned().collect()
                 } else {
                     Vec::new()
                 };
@@ -1525,7 +1532,7 @@ impl<'p> UpdateContext<'p> {
 
         // Otherwise read the records directly from the lock file, converting
         // unresolved records to resolved on a best-effort basis (partial source
-        // records are dropped — they have no version/PackageRecord anyway).
+        // records are dropped -- they have no version/PackageRecord anyway).
         let locked_records = self
             .locked_grouped_repodata_records
             .get(group)
@@ -1612,7 +1619,7 @@ impl<'p> UpdateContext<'p> {
                     .expect("records must be available")
             })
             .or_else(|| {
-                // Prefer pre-resolved records from the satisfiability check —
+                // Prefer pre-resolved records from the satisfiability check --
                 // they have correct versions for source packages.
                 self.pre_resolved_pypi_records
                     .remove(&(environment.clone(), platform.clone()))
@@ -1866,7 +1873,7 @@ impl<'p> UpdateContextBuilder<'p> {
         // Step 2: Store the unresolved records directly. Partial source records
         // are kept as-is and resolved lazily only when needed. This avoids a
         // hard error when a partial record cannot be resolved (e.g. after a
-        // package rename) — the outdated environment will be re-solved anyway.
+        // package rename) -- the outdated environment will be re-solved anyway.
         let mut locked_repodata_records: HashMap<
             crate::workspace::Environment<'_>,
             HashMap<PixiPlatformName, Arc<UnresolvedPixiRecordsByName>>,
@@ -2686,51 +2693,53 @@ impl<'p> UpdateContext<'p> {
     }
 }
 
-/// Constructs an error that indicates that the current platform cannot solve
-/// pypi dependencies because there is no python interpreter available for the
-/// current platform.
+/// Constructs the error shown when pypi dependencies cannot be solved for want
+/// of a usable Python interpreter, disambiguating the two distinct causes:
+///
+/// - The environment declares no platform this machine can run (e.g. a
+///   `__cuda`-requiring platform on a host without CUDA). This is a
+///   virtual-package mismatch, not a missing interpreter, so it is surfaced as
+///   an [`UnsupportedPlatformError`], which names the unsatisfied requirements
+///   and suggests the matching `CONDA_OVERRIDE_*` mocks.
+/// - A runnable platform exists but Python is not among its dependencies.
 fn make_unsupported_pypi_platform_error(
     environment: &Environment<'_>,
     top_level_error: bool,
 ) -> Report {
+    // No host-runnable platform: the real cause is unsatisfied host virtual
+    // packages, not a missing interpreter. Report which requirements are unmet
+    // instead of the misleading `no compatible Python interpreter for '<subdir>'`.
+    let Some(best_platform) = environment.best_declared_platform() else {
+        return Report::new(environment.unsupported_platform_error());
+    };
+
+    // A runnable platform exists, so Python is simply missing from its
+    // dependencies. `best_declared_platform` only returns platforms the
+    // environment declares, so this platform is always in its `platforms` list.
     let grouped_environment = GroupedEnvironment::from(environment.clone());
-    let current_platform_name = environment
-        .best_declared_platform()
-        .map(|p| p.name().clone())
-        .unwrap_or_else(|| Platform::current().into());
-    let platforms = environment.platforms();
+    let platform_name = best_platform.name();
 
     let mut diag = if top_level_error {
         MietteDiagnostic::new(format!(
-            "Unable to solve pypi dependencies for the {} {} — there is no compatible Python interpreter for '{}'",
+            "Unable to solve pypi dependencies for the {} {} -- there is no compatible Python interpreter for '{}'",
             grouped_environment.name().fancy_display(),
             match &grouped_environment {
                 GroupedEnvironment::Group(_) => "solve group",
                 GroupedEnvironment::Environment(_) => "environment",
             },
-            consts::PLATFORM_STYLE.apply_to(&current_platform_name),
+            consts::PLATFORM_STYLE.apply_to(platform_name),
         ))
     } else {
         MietteDiagnostic::new(format!(
             "there is no compatible Python interpreter for '{}'",
-            consts::PLATFORM_STYLE.apply_to(&current_platform_name),
+            consts::PLATFORM_STYLE.apply_to(platform_name),
         ))
     };
 
-    let help_message = if !platforms.contains(&current_platform_name) {
-        // State 1: The current platform is not in the `platforms` list
-        format!(
-            "Try: {}",
-            consts::TASK_STYLE.apply_to(format!(
-                "pixi workspace platform add {current_platform_name}"
-            )),
-        )
-    } else {
-        // State 2: Python is not in the dependencies.
-        format!("Try: {}", consts::TASK_STYLE.apply_to("pixi add python"))
-    };
-
-    diag.help = Some(help_message);
+    diag.help = Some(format!(
+        "Try: {}",
+        consts::TASK_STYLE.apply_to("pixi add python")
+    ));
 
     Report::new(diag)
 }
@@ -2914,6 +2923,12 @@ async fn spawn_solve_conda_environment_task(
             channel_priority: channel_priority.into(),
         },
     ));
+
+    // Inline package definitions for this environment, threaded
+    // into the solve so backend discovery uses them instead of reading a
+    // manifest from disk.
+    let inline_packages = Arc::new(group.combined_inline_packages(Some(pixi_platform)));
+
     // Pass partial source records through alongside binary and full
     // source records: their `manifest_source` and `build_packages` /
     // `host_packages` flow into `InstalledSourceHints`, which the
@@ -2936,6 +2951,7 @@ async fn spawn_solve_conda_environment_task(
             strategy,
             preferred_build_source: Arc::new(pin_overrides),
             env_ref,
+            inline_packages,
         }))
         .await
         .map_err_into_dispatcher(|source| SolveCondaEnvironmentError::SolveFailed {
@@ -3218,10 +3234,8 @@ async fn spawn_extract_environment_task(
 
                 // Dependencies contributed by the requested extra.
                 if let Some(extra) = &extra
-                    && let Some(extra_dependencies) = record
-                        .package_record()
-                        .experimental_extra_depends
-                        .get(extra)
+                    && let Some(extra_dependencies) =
+                        record.package_record().extra_depends.get(extra)
                 {
                     for dependency in extra_dependencies {
                         for entry in conda_dependency_entries(dependency) {

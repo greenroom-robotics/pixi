@@ -10,18 +10,22 @@ Adds a platform(s) to the workspace file and updates the lock file
 
 ## Usage
 ```
-pixi workspace platform add [OPTIONS] <PLATFORM|NAME=PLATFORM|__NAME[=VERSION[=BUILD]]>...
+pixi workspace platform add [OPTIONS] [PLATFORM|NAME=PLATFORM|__NAME[=VERSION[=BUILD]]]...
 ```
 
 ## Arguments
 - <a id="arg-<PLATFORM|NAME=PLATFORM|__NAME[=VERSION[=BUILD]]>" href="#arg-<PLATFORM|NAME=PLATFORM|__NAME[=VERSION[=BUILD]]>">`<PLATFORM|NAME=PLATFORM|__NAME[=VERSION[=BUILD]]>`</a>
 :  Platforms to add, optionally followed by raw virtual-package specs
 <br>May be provided more than once.
-<br>**required**: `true`
 
 ## Options
+- <a id="arg---auto-detect" href="#arg---auto-detect">`--auto-detect`</a>
+:  Detect this machine's platform (subdir and virtual packages) instead of naming a subdir. Optionally pass a single `<name>` to name it; any virtual-package flags override the detected values. The detected platform is placed at the top of the list
+<br>**aliases**: auto-detected, current
 - <a id="arg---cuda" href="#arg---cuda">`--cuda <VERSION>`</a>
 :  Declare a `__cuda` virtual package at the given version, e.g. `12.0`. Valid on any subdir
+- <a id="arg---cuda-arch" href="#arg---cuda-arch">`--cuda-arch <VERSION>`</a>
+:  Declare a `__cuda_arch` virtual package (GPU compute capability) at the given version, e.g. `8.6`. Requires `--cuda` (or an existing `__cuda`), matching the conda CEP coupling. Serialized as `cuda = { driver, arch }`
 - <a id="arg---archspec" href="#arg---archspec">`--archspec <ARCH>`</a>
 :  Declare a `__archspec` virtual package with the given microarchitecture string, e.g. `x86-64-v3`. Valid on any subdir
 - <a id="arg---glibc" href="#arg---glibc">`--glibc <VERSION>`</a>
@@ -38,5 +42,7 @@ pixi workspace platform add [OPTIONS] <PLATFORM|NAME=PLATFORM|__NAME[=VERSION[=B
 <br>**env**: `PIXI_NO_INSTALL`
 - <a id="arg---feature" href="#arg---feature">`--feature (-f) <FEATURE>`</a>
 :  The name of the feature to add the platform to
+- <a id="arg---environment" href="#arg---environment">`--environment (-e) <ENVIRONMENT>`</a>
+:  The environment to add the platform to. The platform is written to the platforms defined inline on the environment
 
 --8<-- "docs/reference/cli/pixi/workspace/platform/add_extender:example"

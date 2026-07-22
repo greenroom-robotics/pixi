@@ -281,7 +281,7 @@ impl Key for SolveCondaKey {
         if let Some(reporter) = gateway_reporter {
             query = query.with_reporter(WrappingGatewayReporter(reporter));
         }
-        let binary_repodata = query.await?;
+        let binary_repodata = query.await?.repodata;
         // `binary_repodata.len()` returns the number of subdir buckets,
         // not the number of records. Sum across them to get the real
         // count the solver is about to chew through.
@@ -344,13 +344,12 @@ fn derive_fetch_specs_from_source_repodata(spec: &SolveCondaSpec) -> Vec<MatchSp
     for sm in &spec.source_repodata {
         for record in &sm.records {
             let sources = record.sources();
-            for depend in record.package_record().depends.iter().chain(
-                record
-                    .package_record()
-                    .experimental_extra_depends
-                    .values()
-                    .flatten(),
-            ) {
+            for depend in record
+                .package_record()
+                .depends
+                .iter()
+                .chain(record.package_record().extra_depends.values().flatten())
+            {
                 let Ok(match_spec) = MatchSpec::from_str(
                     depend,
                     ParseMatchSpecOptions::lenient().with_repodata_revision(RepodataRevision::V3),
