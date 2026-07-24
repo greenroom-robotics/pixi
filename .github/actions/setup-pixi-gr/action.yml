@@ -1,0 +1,24 @@
+name: Setup pixi-gr
+description: >
+  Install the Greenroom pixi fork (native az:// Azure Blob channel support) as
+  `pixi` and install the workspace environment from the lockfile. Replaces
+  prefix-dev/setup-pixi, whose upstream pixi cannot read our az:// channels.
+  Requires an `az login` (azure/login) beforehand so SAS minting works.
+inputs:
+  version:
+    description: pixi-gr release version (see greenroom-robotics/pixi releases).
+    required: false
+    default: "0.73.0"
+  frozen:
+    description: Install from the lockfile without re-solving.
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        curl -fsSL "https://github.com/greenroom-robotics/pixi/releases/download/pixi-gr@${{ inputs.version }}/install.sh" | sh
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+    - shell: bash
+      run: pixi install ${{ inputs.frozen == 'true' && '--frozen' || '' }}
