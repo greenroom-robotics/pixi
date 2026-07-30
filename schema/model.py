@@ -168,7 +168,7 @@ class WorkspacePlatform(BaseModel):
     )
     archspec: NonEmptyStr | None = Field(
         None,
-        description="Declare a `__archspec` virtual package with the given microarchitecture, e.g. `x86-64-v3`.",
+        description="Declare a `__archspec` virtual package with the given microarchitecture, e.g. `x86_64_v3`.",
     )
     glibc: NonEmptyStr | None = Field(
         None,
@@ -1141,6 +1141,11 @@ class Package(StrictBaseModel):
     documentation: AnyHttpUrl | WorkspaceInheritance | None = Field(
         None,
         description="The URL of the documentation of the project. Can be a URL or { workspace = true } to inherit from workspace",
+    )
+
+    publish: bool | None = Field(
+        None,
+        description="Whether a workspace-wide `pixi publish` publishes this package. Packages that do not opt in with `publish = true` are left out of the publish set.",
     )
 
     build: Build = Field(..., description="The build configuration of the package")

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://pixi.sh/v0.73.0/schema/manifest/pyproject/schema.json",
+  "$id": "https://pixi.sh/v0.75.0/schema/manifest/pyproject/schema.json",
   "title": "`pyproject.toml` manifest file for `pixi`",
   "description": "A `pyproject.toml` with `[tool.pixi]`.",
   "type": "object",
@@ -1674,6 +1674,11 @@
               "$ref": "#/$defs/WorkspaceInheritance"
             }
           ]
+        },
+        "publish": {
+          "title": "Publish",
+          "description": "Whether a workspace-wide `pixi publish` publishes this package. Packages that do not opt in with `publish = true` are left out of the publish set.",
+          "type": "boolean"
         },
         "readme": {
           "title": "Readme",
@@ -3623,7 +3628,7 @@
       "properties": {
         "archspec": {
           "title": "Archspec",
-          "description": "Declare a `__archspec` virtual package with the given microarchitecture, e.g. `x86-64-v3`.",
+          "description": "Declare a `__archspec` virtual package with the given microarchitecture, e.g. `x86_64_v3`.",
           "type": "string",
           "minLength": 1
         },

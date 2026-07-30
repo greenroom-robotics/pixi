@@ -28,6 +28,17 @@ pixi self-update [OPTIONS]
 - <a id="arg---no-release-note" href="#arg---no-release-note">`--no-release-note`</a>
 :  Skip printing the release notes
 <br>**default**: `false`
+- <a id="arg---from-url" href="#arg---from-url">`--from-url <FROM_URL>`</a>
+:  The github releases URL, useful when behind a proxy, or using custom Pixi release
+
+## Config Options
+- <a id="arg---no-config" href="#arg---no-config">`--no-config`</a>
+:  Don't read system or user-level configuration files. Project-local `<project>/.pixi/config.toml` is still loaded
+<br>**env**: `PIXI_NO_CONFIG`
+<br>**default**: `false`
+- <a id="arg---config-file" href="#arg---config-file">`--config-file <PATH>`</a>
+:  Load configuration from this file instead of searching system and user-level paths. Project-local `<project>/.pixi/config.toml` is still merged on top
+<br>**env**: `PIXI_CONFIG_FILE`
 
 ## Config Options
 - <a id="arg---no-config" href="#arg---no-config">`--no-config`</a>
