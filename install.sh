@@ -32,7 +32,8 @@ fi
 # `pixi global install` writes, so both have to be on PATH.
 for dir in "$DEST" "${PIXI_HOME:-$HOME/.pixi}/bin"; do
   case ":$PATH:" in *":$dir:"*) continue ;; esac
-  case "${SHELL##*/}" in
+  shell="${SHELL:-}"
+  case "${shell##*/}" in
     bash) rc="$HOME/.bashrc"; line="export PATH=\"$dir:\$PATH\"" ;;
     zsh) rc="$HOME/.zshrc"; line="export PATH=\"$dir:\$PATH\"" ;;
     fish) rc="$HOME/.config/fish/config.fish"; line="set -gx PATH \"$dir\" \$PATH" ;;
