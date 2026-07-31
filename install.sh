@@ -28,7 +28,18 @@ if [ -n "$existing" ] && [ "$existing" != "$DEST/pixi" ]; then
   echo "         remove it (or put $DEST first) so this GR build is the one that runs." >&2
 fi
 
-case ":$PATH:" in
-  *":$DEST:"*) ;;
-  *) echo "note: add $DEST to your PATH" >&2 ;;
-esac
+# $DEST holds the `pixi` binary; $PIXI_HOME/bin holds the trampolines that
+# `pixi global install` writes, so both have to be on PATH.
+for dir in "$DEST" "${PIXI_HOME:-$HOME/.pixi}/bin"; do
+  case ":$PATH:" in *":$dir:"*) continue ;; esac
+  case "${SHELL##*/}" in
+    bash) rc="$HOME/.bashrc"; line="export PATH=\"$dir:\$PATH\"" ;;
+    zsh) rc="$HOME/.zshrc"; line="export PATH=\"$dir:\$PATH\"" ;;
+    fish) rc="$HOME/.config/fish/config.fish"; line="set -gx PATH \"$dir\" \$PATH" ;;
+    *) echo "note: add $dir to your PATH" >&2; continue ;;
+  esac
+  grep -Fxq "$line" "$rc" 2>/dev/null && continue
+  mkdir -p "$(dirname "$rc")"
+  printf '\n%s\n' "$line" >>"$rc"
+  echo "added $dir to PATH in $rc — restart or source your shell"
+done
