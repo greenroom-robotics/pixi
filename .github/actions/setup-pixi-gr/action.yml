@@ -20,5 +20,7 @@ runs:
       run: |
         curl -fsSL "https://github.com/greenroom-robotics/pixi/releases/download/pixi-gr@${{ inputs.version }}/install.sh" | sh
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        # `pixi global install` writes trampolines here.
+        echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
     - shell: bash
       run: pixi install ${{ inputs.frozen == 'true' && '--frozen' || '' }}
