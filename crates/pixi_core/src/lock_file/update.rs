@@ -424,7 +424,9 @@ impl Workspace {
     /// - `.into_lock_file_or_empty()` - silent fallback to empty
     /// - `.into_lock_file_or_empty_with_warning()` - displays warning and continues
     pub async fn load_lock_file(&self) -> miette::Result<LockFileLoadResult> {
-        let lock_file_path = self.lock_file_path();
+        let Some(lock_file_path) = self.persistent_lock_file_path() else {
+            return Ok(LockFileLoadResult::Loaded(LockFile::default()));
+        };
         let manifest = self.workspace_manifest().clone();
         let workspace_root = self.root().to_path_buf();
         if lock_file_path.is_file() {
@@ -677,7 +679,29 @@ impl<'p> LockFileDerivedData<'p> {
 
     /// Write the lock file to disk.
     pub fn write_to_disk(&self) -> miette::Result<()> {
-        let lock_file_path = self.workspace.lock_file_path();
+        // An offline solve records the newest versions available on this
+        // machine, which may be older than what the channels offer. The lock
+        // file is usually committed, so say so rather than let a downgrade
+        // land silently in someone's diff.
+        if self.workspace.config().offline() {
+            tracing::warn!("{}", pixi_consts::consts::OFFLINE_LOCK_FILE_WARNING);
+
+            // The restriction only covers conda packages, so in a workspace
+            // with PyPI dependencies a successful solve still does not promise
+            // an offline install. Say so where the user is, not only in docs.
+            if self
+                .workspace
+                .environments()
+                .iter()
+                .any(|env| env.has_pypi_dependencies())
+            {
+                tracing::warn!("{}", pixi_consts::consts::OFFLINE_PYPI_WARNING);
+            }
+        }
+
+        let lock_file_path = self.workspace.persistent_lock_file_path().ok_or_else(|| {
+            miette::miette!("transient script workspaces cannot write lock files")
+        })?;
         // Shorten rich platform names to `p1`, `p2`, ... on disk; the load-time
         // pass restores the manifest names by identity.
         let lock_file = crate::lock_file::platform_rename::shorten_platform_names(
@@ -810,6 +834,7 @@ impl<'p> LockFileDerivedData<'p> {
                 environment_lock_file_hash: hash,
                 resolved_platform,
                 minimum_supported_platform,
+                source_fingerprints: Default::default(),
             },
         )?;
 
@@ -2034,7 +2059,7 @@ impl<'p> UpdateContextBuilder<'p> {
                 let cache_path = project
                     .config()
                     .cache_dir_for(pixi_config::CacheKind::PypiMapping)?;
-                PurlDerivationClient::builder(client, cache_path)
+                PurlDerivationClient::builder(client, cache_path, project.config().offline())
                     .with_concurrency_limit(project.concurrent_downloads_semaphore())
                     .finish()
             }

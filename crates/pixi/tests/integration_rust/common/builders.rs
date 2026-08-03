@@ -26,7 +26,8 @@
 use pixi_cli::{
     add, build,
     cli_config::{
-        DependencyConfig, GitRev, LockFileUpdateConfig, NoInstallConfig, WorkspaceConfig,
+        DependencyConfig, GitRev, LockFileUpdateConfig, NoInstallConfig, ScriptWorkspaceConfig,
+        WorkspaceConfig,
     },
     global, init, install, lock, remove, search, task, update, workspace,
 };
@@ -164,6 +165,7 @@ pub trait HasDependencyConfig: Sized {
             environment: Default::default(),
             git: Default::default(),
             rev: Default::default(),
+            subdirectory: Default::default(),
             subdir: Default::default(),
         }
     }
@@ -244,7 +246,13 @@ impl AddBuilder {
         self
     }
 
-    pub fn with_git_subdir(mut self, subdir: String) -> Self {
+    pub fn with_git_subdirectory(mut self, subdirectory: String) -> Self {
+        self.args.dependency_config.subdirectory = Some(subdirectory);
+        self
+    }
+
+    /// Sets the deprecated `--subdir` alias rather than `--subdirectory`.
+    pub fn with_deprecated_git_subdir(mut self, subdir: String) -> Self {
         self.args.dependency_config.subdir = Some(subdir);
         self
     }
@@ -412,7 +420,7 @@ impl TaskAliasBuilder {
 }
 
 pub struct ProjectChannelAddBuilder {
-    pub workspace_config: WorkspaceConfig,
+    pub workspace_config: ScriptWorkspaceConfig,
     pub args: workspace::channel::AddRemoveArgs,
 }
 
@@ -454,7 +462,7 @@ impl IntoFuture for ProjectChannelAddBuilder {
 }
 
 pub struct ProjectChannelRemoveBuilder {
-    pub workspace_config: WorkspaceConfig,
+    pub workspace_config: ScriptWorkspaceConfig,
     pub args: workspace::channel::AddRemoveArgs,
 }
 

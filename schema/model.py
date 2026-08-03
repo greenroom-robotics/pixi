@@ -168,7 +168,7 @@ class WorkspacePlatform(BaseModel):
     )
     archspec: NonEmptyStr | None = Field(
         None,
-        description="Declare a `__archspec` virtual package with the given microarchitecture, e.g. `x86-64-v3`.",
+        description="Declare a `__archspec` virtual package with the given microarchitecture, e.g. `x86_64_v3`.",
     )
     glibc: NonEmptyStr | None = Field(
         None,
@@ -1097,6 +1097,31 @@ class PyPIOptions(StrictBaseModel):
 #######################
 
 
+class RunExports(StrictBaseModel):
+    """The run-exports the package declares for its downstream consumers."""
+
+    noarch: ConditionalInheritableDependencies = Field(
+        None,
+        description="The only run-export bucket applied when the consuming output is `noarch`: added to the run dependencies of noarch consumers that depend on this package in `host-dependencies`.",
+    )
+    strong: ConditionalInheritableDependencies = Field(
+        None,
+        description="Added to the run dependencies of consumers that depend on this package in `build-dependencies` or `host-dependencies`.",
+    )
+    weak: ConditionalInheritableDependencies = Field(
+        None,
+        description="Added to the run dependencies of consumers that depend on this package in `host-dependencies`.",
+    )
+    strong_constraints: ConditionalInheritableDependencies = Field(
+        None,
+        description="Added to the run constraints of consumers that depend on this package in `build-dependencies` or `host-dependencies`. Constraints only restrict versions and cannot be source specs.",
+    )
+    weak_constraints: ConditionalInheritableDependencies = Field(
+        None,
+        description="Added to the run constraints of consumers that depend on this package in `host-dependencies`. Constraints only restrict versions and cannot be source specs.",
+    )
+
+
 class Package(StrictBaseModel):
     """The package's metadata information."""
 
@@ -1143,6 +1168,11 @@ class Package(StrictBaseModel):
         description="The URL of the documentation of the project. Can be a URL or { workspace = true } to inherit from workspace",
     )
 
+    publish: bool | None = Field(
+        None,
+        description="Whether a workspace-wide `pixi publish` publishes this package. Packages that do not opt in with `publish = true` are left out of the publish set.",
+    )
+
     build: Build = Field(..., description="The build configuration of the package")
 
     host_dependencies: ConditionalInheritableDependencies = HostDependenciesField
@@ -1154,6 +1184,11 @@ class Package(StrictBaseModel):
         examples=[{"test": {"pytest": ">=8", "hypothesis": "*"}}],
     )
     run_constraints: ConditionalInheritableDependencies = RunConstraintsField
+    run_exports: RunExports | None = Field(
+        None,
+        description="The run-exports this package declares for its consumers, mirroring the conda run-exports mechanism. See https://pixi.sh/latest/build/dependency_types/ for more information.",
+        examples=[{"weak": {"libfoo": ">=1,<2"}}],
+    )
 
 
 class BuildTarget(StrictBaseModel):

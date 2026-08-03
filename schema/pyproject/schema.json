@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://pixi.sh/v0.73.0/schema/manifest/pyproject/schema.json",
+  "$id": "https://pixi.sh/v0.75.0/schema/manifest/pyproject/schema.json",
   "title": "`pyproject.toml` manifest file for `pixi`",
   "description": "A `pyproject.toml` with `[tool.pixi]`.",
   "type": "object",
@@ -1675,6 +1675,11 @@
             }
           ]
         },
+        "publish": {
+          "title": "Publish",
+          "description": "Whether a workspace-wide `pixi publish` publishes this package. Packages that do not opt in with `publish = true` are left out of the publish set.",
+          "type": "boolean"
+        },
         "readme": {
           "title": "Readme",
           "description": "The path to the readme file of the project. Can be a path or { workspace = true } to inherit from workspace",
@@ -1773,6 +1778,17 @@
           "propertyNames": {
             "minLength": 1
           }
+        },
+        "run-exports": {
+          "$ref": "#/$defs/RunExports",
+          "description": "The run-exports this package declares for its consumers, mirroring the conda run-exports mechanism. See https://pixi.sh/latest/build/dependency_types/ for more information.",
+          "examples": [
+            {
+              "weak": {
+                "libfoo": ">=1,<2"
+              }
+            }
+          ]
         },
         "version": {
           "title": "Version",
@@ -2516,6 +2532,194 @@
         "pixi": {
           "$ref": "#/$defs/PyProjectPixiTool",
           "description": "`pixi` configuration"
+        }
+      }
+    },
+    "RunExports": {
+      "title": "RunExports",
+      "description": "The run-exports the package declares for its downstream consumers.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "noarch": {
+          "title": "Noarch",
+          "description": "The only run-export bucket applied when the consuming output is `noarch`: added to the run dependencies of noarch consumers that depend on this package in `host-dependencies`.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/InheritableMatchspecTable"
+              },
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "$ref": "#/$defs/InheritableMatchspecTable"
+                    }
+                  ]
+                },
+                "propertyNames": {
+                  "minLength": 1
+                }
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          }
+        },
+        "strong": {
+          "title": "Strong",
+          "description": "Added to the run dependencies of consumers that depend on this package in `build-dependencies` or `host-dependencies`.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/InheritableMatchspecTable"
+              },
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "$ref": "#/$defs/InheritableMatchspecTable"
+                    }
+                  ]
+                },
+                "propertyNames": {
+                  "minLength": 1
+                }
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          }
+        },
+        "strong-constraints": {
+          "title": "Strong-Constraints",
+          "description": "Added to the run constraints of consumers that depend on this package in `build-dependencies` or `host-dependencies`. Constraints only restrict versions and cannot be source specs.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/InheritableMatchspecTable"
+              },
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "$ref": "#/$defs/InheritableMatchspecTable"
+                    }
+                  ]
+                },
+                "propertyNames": {
+                  "minLength": 1
+                }
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          }
+        },
+        "weak": {
+          "title": "Weak",
+          "description": "Added to the run dependencies of consumers that depend on this package in `host-dependencies`.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/InheritableMatchspecTable"
+              },
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "$ref": "#/$defs/InheritableMatchspecTable"
+                    }
+                  ]
+                },
+                "propertyNames": {
+                  "minLength": 1
+                }
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          }
+        },
+        "weak-constraints": {
+          "title": "Weak-Constraints",
+          "description": "Added to the run constraints of consumers that depend on this package in `host-dependencies`. Constraints only restrict versions and cannot be source specs.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/$defs/InheritableMatchspecTable"
+              },
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "$ref": "#/$defs/InheritableMatchspecTable"
+                    }
+                  ]
+                },
+                "propertyNames": {
+                  "minLength": 1
+                }
+              }
+            ]
+          },
+          "propertyNames": {
+            "minLength": 1
+          }
         }
       }
     },
@@ -3623,7 +3827,7 @@
       "properties": {
         "archspec": {
           "title": "Archspec",
-          "description": "Declare a `__archspec` virtual package with the given microarchitecture, e.g. `x86-64-v3`.",
+          "description": "Declare a `__archspec` virtual package with the given microarchitecture, e.g. `x86_64_v3`.",
           "type": "string",
           "minLength": 1
         },

@@ -5,7 +5,7 @@
 //! `package.xml` is present alongside the manifest).
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use miette::Diagnostic;
@@ -18,7 +18,7 @@ use rattler_build_recipe::stage0::{
 use rattler_conda_types::{ChannelUrl, NoArchType, Platform};
 use thiserror::Error;
 
-use crate::build_script::render_build_script;
+use crate::build_script::{BuildScriptError, render_build_script};
 use crate::config::{RosBackendConfig, RosBuildType, extract_distro_from_channels_list};
 
 #[derive(Debug, Error, Diagnostic)]
@@ -288,12 +288,6 @@ pub async fn generate(
     req.run.extend(run_items);
 
     // Build script.
-    let build_type_str = match build_type {
-        RosBuildType::AmentCmake => "ament_cmake",
-        RosBuildType::AmentPython => "ament_python",
-        RosBuildType::AmentCargo => "ament_cargo",
-        RosBuildType::AmentIdl => "ament_idl",
-    };
     // All ament_* build types need a package.xml at build time:
     // ament_package() / setup.py / cargo-ament-build all read or install it.
     // Plain cmake/catkin builds ignore this argument.
@@ -310,14 +304,8 @@ pub async fn generate(
         Ok(content) => content,
         Err(_) => synthesize_package_xml(model, build_type),
     };
-    let synth_xml = Some(xml);
-    let script_content = render_build_script(
-        build_type_str,
-        &distro,
-        &manifest_root,
-        synth_xml.as_deref(),
-    )
-    .map_err(|e| miette::miette!("failed to render build script: {e}"))?;
+    let script_content = render_native_build_script(build_type, &distro, &manifest_root, &xml)
+        .map_err(|e| miette::miette!("failed to render build script: {e}"))?;
 
     let mut script_env: IndexMap<String, Value<String>> = IndexMap::new();
     script_env.insert(
@@ -338,9 +326,9 @@ pub async fn generate(
         .with_env(script_env)
         .with_secrets(model.secrets.iter().cloned().collect());
 
-    if let Some(n) = config.build_number {
-        generated.recipe.build.number = Some(Value::new_concrete(n, None));
-    }
+    // Build number is not handled here: pixi applies manifest-level
+    // `[package.build] build-number` generically as a render-config override
+    // (see `intermediate_backend.rs`), for both code paths.
 
     if is_noarch {
         generated.recipe.build.noarch = Some(Value::new_concrete(NoArchType::python(), None));
@@ -493,6 +481,35 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Render a pixi-native build script.
+///
+/// The fork-only build types and the synthesized-`package.xml` substitution live
+/// here so `build_script.rs` stays byte-identical to upstream's. `ament_idl`
+/// reuses the `ament_cmake` template: the build flow is identical, only the
+/// synthesized package.xml differs (it carries the `rosidl_interface_packages`
+/// `member_of_group` declaration).
+fn render_native_build_script(
+    build_type: RosBuildType,
+    distro: &str,
+    source_dir: &Path,
+    package_xml: &str,
+) -> Result<String, BuildScriptError> {
+    let rendered = match build_type {
+        // ament_cargo has no upstream template; render it here with the same
+        // substitutions upstream's `render_build_script` applies.
+        RosBuildType::AmentCargo => include_str!("../templates/build_ament_cargo.sh")
+            .replace("@SRC_DIR@", &source_dir.display().to_string())
+            .replace("@DISTRO@", distro)
+            .replace("@BUILD_DIR@", "build")
+            .replace("@BUILD_TYPE@", "Release"),
+        RosBuildType::AmentCmake | RosBuildType::AmentIdl => {
+            render_build_script("ament_cmake", distro, source_dir)?
+        }
+        RosBuildType::AmentPython => render_build_script("ament_python", distro, source_dir)?,
+    };
+    Ok(rendered.replace("@PACKAGE_XML_CONTENT@", package_xml))
+}
+
 fn template_value(template_str: &str) -> Item<SerializableMatchSpec> {
     let tmpl = JinjaTemplate::new(template_str.to_string()).expect("valid jinja template");
     Item::Value(Value::new_template(tmpl, None))
@@ -504,6 +521,72 @@ mod tests {
 
     fn empty_config() -> RosBackendConfig {
         RosBackendConfig::default()
+    }
+
+    /// Every build type must substitute all four upstream placeholders plus the
+    /// synthesized package.xml. `ament_cargo` renders from a fork-only template
+    /// and `ament_idl` borrows `ament_cmake`'s, so neither is exercised by the
+    /// snapshot test — this guards the whole match arm-by-arm.
+    #[test]
+    fn render_native_build_script_substitutes_all_placeholders() {
+        for build_type in [
+            RosBuildType::AmentCmake,
+            RosBuildType::AmentPython,
+            RosBuildType::AmentCargo,
+            RosBuildType::AmentIdl,
+        ] {
+            let script = render_native_build_script(
+                build_type,
+                "kilted",
+                Path::new("/my/source"),
+                "<package>synthesized</package>",
+            )
+            .unwrap_or_else(|e| panic!("{build_type:?} failed to render: {e}"));
+
+            for placeholder in [
+                "@SRC_DIR@",
+                "@DISTRO@",
+                "@BUILD_DIR@",
+                "@BUILD_TYPE@",
+                "@PACKAGE_XML_CONTENT@",
+            ] {
+                assert!(
+                    !script.contains(placeholder),
+                    "{build_type:?} left {placeholder} unsubstituted"
+                );
+            }
+            assert!(
+                script.contains("<package>synthesized</package>"),
+                "{build_type:?} did not inline the package.xml"
+            );
+        }
+
+        // ament_idl reuses the ament_cmake template verbatim.
+        let idl = render_native_build_script(
+            RosBuildType::AmentIdl,
+            "kilted",
+            Path::new("/my/source"),
+            "<package/>",
+        )
+        .unwrap();
+        let cmake = render_native_build_script(
+            RosBuildType::AmentCmake,
+            "kilted",
+            Path::new("/my/source"),
+            "<package/>",
+        )
+        .unwrap();
+        assert_eq!(idl, cmake);
+
+        // ament_cargo must come from the fork-only template.
+        let cargo = render_native_build_script(
+            RosBuildType::AmentCargo,
+            "kilted",
+            Path::new("/my/source"),
+            "<package/>",
+        )
+        .unwrap();
+        assert!(cargo.contains("cargo ament-build"));
     }
 
     fn model_with_deps(host: &[&str], run: &[&str]) -> ProjectModel {
@@ -902,31 +985,6 @@ mod tests {
             .expect("concrete name")
             .to_string();
         assert_eq!(name, "ros-kilted-test-pkg");
-    }
-
-    #[tokio::test]
-    async fn build_number_applied_from_config() {
-        let mut cfg = cfg_pixi_native(RosBuildType::AmentCmake);
-        cfg.build_number = Some(7);
-        let model = model_with_deps(&["ros-kilted-rclcpp"], &[]);
-        let recipe = generate(
-            &model,
-            &cfg,
-            PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
-            vec![],
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            recipe
-                .recipe
-                .build
-                .number
-                .as_ref()
-                .and_then(|v| v.as_concrete().copied()),
-            Some(7)
-        );
     }
 
     #[tokio::test]

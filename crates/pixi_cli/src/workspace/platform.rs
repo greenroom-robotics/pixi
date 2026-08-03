@@ -5,8 +5,8 @@ use std::str::FromStr;
 use clap::Parser;
 use miette::IntoDiagnostic;
 use pixi_api::WorkspaceContext;
-use pixi_core::WorkspaceLocator;
 use pixi_core::workspace::{PlatformOverrides, PlatformSource};
+use pixi_core::{WorkspaceLocator, environment::LockFileUsage};
 use pixi_manifest::{
     EnvironmentName, FeatureName, FeaturesExt, HasWorkspaceManifest, PixiPlatform,
     PixiPlatformName, PlatformEdit, PlatformMove, platform::subdir_default_virtual_packages,
@@ -14,7 +14,7 @@ use pixi_manifest::{
 use rattler_conda_types::{GenericVirtualPackage, PackageName, Platform, Version};
 use rattler_virtual_packages::{VirtualPackageOverrides, VirtualPackages};
 
-use crate::{cli_config::WorkspaceConfig, cli_interface::CliInterface};
+use crate::{cli_config::ScriptWorkspaceConfig, cli_interface::CliInterface};
 
 /// Commands to manage workspace platforms.
 #[derive(Parser, Debug)]
@@ -23,7 +23,7 @@ pub struct Args {
     pub config_source: pixi_config::ConfigSourceCli,
 
     #[clap(flatten)]
-    pub workspace_config: WorkspaceConfig,
+    pub workspace_config: ScriptWorkspaceConfig,
 
     #[clap(subcommand)]
     pub command: Command,
@@ -52,7 +52,7 @@ pub struct VirtualPackageArgs {
     pub cuda_arch: Option<String>,
 
     /// Declare a `__archspec` virtual package with the given microarchitecture
-    /// string, e.g. `x86-64-v3`. Valid on any subdir.
+    /// string, e.g. `x86_64_v3`. Valid on any subdir.
     #[clap(long, value_name = "ARCH")]
     pub archspec: Option<String>,
 
@@ -128,6 +128,8 @@ impl VirtualPackageArgs {
             if value.is_empty() {
                 miette::bail!("--archspec requires a non-empty microarchitecture string");
             }
+            pixi_manifest::platform::validate_archspec_name(&value)
+                .map_err(|message| miette::miette!("{message}"))?;
             push_unique(
                 &mut specs,
                 &mut seen_names,
@@ -238,7 +240,9 @@ fn parse_virtual_package_version(flag: &str, value: &str) -> miette::Result<Vers
 }
 
 fn parse_raw_virtual_package(spec: &str) -> miette::Result<GenericVirtualPackage> {
-    let mut parts = spec.split('=');
+    // `splitn` keeps trailing '=' segments in the build string, matching the
+    // manifest's raw parser, instead of silently dropping them.
+    let mut parts = spec.splitn(3, '=');
     let name_str = parts.next().unwrap_or("");
     if name_str.strip_prefix("__").is_none_or(str::is_empty) {
         miette::bail!(
@@ -258,6 +262,8 @@ fn parse_raw_virtual_package(spec: &str) -> miette::Result<GenericVirtualPackage
         .transpose()?
         .unwrap_or_else(zero_version);
     let build_string = parts.next().unwrap_or("").to_string();
+    pixi_manifest::platform::validate_virtual_package_build_string(&name, &build_string)
+        .map_err(|message| miette::miette!("{message}"))?;
     Ok(GenericVirtualPackage {
         name,
         version,
@@ -451,26 +457,75 @@ pub enum Command {
     Remove(RemoveArgs),
 }
 
+impl Args {
+    fn validate_script_options(&self) -> miette::Result<()> {
+        if self.workspace_config.script.is_none() {
+            return Ok(());
+        }
+
+        let (feature, environment) = match &self.command {
+            Command::Add(args) => (&args.feature, &args.environment),
+            Command::Remove(args) => (&args.feature, &args.environment),
+            Command::Edit(_) | Command::Move(_) | Command::List(_) => return Ok(()),
+        };
+
+        let mut unsupported = Vec::new();
+        if feature.is_some() {
+            unsupported.push("--feature");
+        }
+        if environment.is_some() {
+            unsupported.push("--environment");
+        }
+
+        if unsupported.is_empty() {
+            Ok(())
+        } else {
+            Err(miette::miette!(
+                help = "A PEP 723 script has one implicit default run environment.",
+                "`pixi workspace platform --script` does not support {}",
+                unsupported.join(", ")
+            ))
+        }
+    }
+}
+
 pub async fn execute(args: Args) -> miette::Result<()> {
+    args.validate_script_options()?;
+
     let workspace = WorkspaceLocator::for_cli()
         .with_global_config_source(args.config_source.source())
         .with_search_start(args.workspace_config.workspace_locator_start())
         .locate()?;
 
+    let lock_file_usage = platform_lock_file_usage(
+        args.workspace_config.script.is_some(),
+        workspace.lock_file_path().is_file(),
+    );
     let workspace_ctx = WorkspaceContext::new(CliInterface {}, workspace.clone());
 
     match args.command {
-        Command::Add(args) => execute_add(&workspace_ctx, args).await,
-        Command::Edit(args) => execute_edit(&workspace_ctx, args).await,
-        Command::Move(args) => execute_move(&workspace_ctx, args).await,
+        Command::Add(args) => execute_add(&workspace_ctx, args, lock_file_usage).await,
+        Command::Edit(args) => execute_edit(&workspace_ctx, args, lock_file_usage).await,
+        Command::Move(args) => execute_move(&workspace_ctx, args, lock_file_usage).await,
         Command::List(args) => execute_list(&workspace_ctx, args).await,
-        Command::Remove(args) => execute_remove(&workspace, &workspace_ctx, args).await,
+        Command::Remove(args) => {
+            execute_remove(&workspace, &workspace_ctx, args, lock_file_usage).await
+        }
+    }
+}
+
+fn platform_lock_file_usage(is_script: bool, lock_file_exists: bool) -> LockFileUsage {
+    if is_script && !lock_file_exists {
+        LockFileUsage::Frozen
+    } else {
+        LockFileUsage::Update
     }
 }
 
 async fn execute_add(
     workspace_ctx: &WorkspaceContext<CliInterface>,
     args: AddArgs,
+    lock_file_usage: LockFileUsage,
 ) -> miette::Result<()> {
     // Positionals beginning with `__` are raw virtual-package specs; the rest
     // are platform entries. The split mirrors the TOML's `__name = "..."`
@@ -505,6 +560,7 @@ async fn execute_add(
             &raw_specs,
             args.no_install,
             crate::cli_config::feature_from_flags(args.environment.as_ref(), args.feature.as_ref()),
+            lock_file_usage,
         )
         .await;
     }
@@ -563,6 +619,7 @@ async fn execute_add(
             platforms,
             args.no_install,
             crate::cli_config::feature_from_flags(args.environment.as_ref(), args.feature.as_ref()),
+            lock_file_usage,
         )
         .await
 }
@@ -577,6 +634,7 @@ async fn execute_add_auto_detected(
     raw_specs: &[String],
     no_install: bool,
     feature: FeatureName,
+    lock_file_usage: LockFileUsage,
 ) -> miette::Result<()> {
     let detected = workspace_ctx.workspace().host_platform(
         PlatformSource::AutoDetected,
@@ -589,7 +647,7 @@ async fn execute_add_auto_detected(
     let candidate =
         PixiPlatform::from_detection(explicit_name, subdir, merged).into_diagnostic()?;
     workspace_ctx
-        .add_auto_detected_platform(candidate, explicit, no_install, feature)
+        .add_auto_detected_platform(candidate, explicit, no_install, feature, lock_file_usage)
         .await
 }
 
@@ -611,6 +669,7 @@ fn merge_virtual_packages(
 async fn execute_edit(
     workspace_ctx: &WorkspaceContext<CliInterface>,
     args: EditArgs,
+    lock_file_usage: LockFileUsage,
 ) -> miette::Result<()> {
     // For `edit`, we don't yet know the platform's subdir if --subdir wasn't
     // supplied, so resolve from the workspace first.
@@ -660,13 +719,14 @@ async fn execute_edit(
     }
 
     workspace_ctx
-        .edit_platform(args.name, edit, args.no_install)
+        .edit_platform(args.name, edit, args.no_install, lock_file_usage)
         .await
 }
 
 async fn execute_move(
     workspace_ctx: &WorkspaceContext<CliInterface>,
     args: MoveArgs,
+    lock_file_usage: LockFileUsage,
 ) -> miette::Result<()> {
     let target = match (args.to_top, args.to_bottom, args.before, args.after) {
         (true, _, _, _) => PlatformMove::ToTop,
@@ -677,7 +737,7 @@ async fn execute_move(
     };
 
     workspace_ctx
-        .move_platform(args.name, target, args.no_install)
+        .move_platform(args.name, target, args.no_install, lock_file_usage)
         .await
 }
 
@@ -776,6 +836,7 @@ async fn execute_remove(
     workspace: &pixi_core::Workspace,
     workspace_ctx: &WorkspaceContext<CliInterface>,
     args: RemoveArgs,
+    lock_file_usage: LockFileUsage,
 ) -> miette::Result<()> {
     let workspace_platforms = workspace.workspace_manifest().workspace.platforms.clone();
     let platforms = args
@@ -799,6 +860,7 @@ async fn execute_remove(
             platforms,
             args.no_install,
             crate::cli_config::feature_from_flags(args.environment.as_ref(), args.feature.as_ref()),
+            lock_file_usage,
         )
         .await
 }
@@ -1292,6 +1354,34 @@ mod tests {
             .collect();
         assert_eq!(by_name.get("__cuda").map(String::as_str), Some("12.0"));
         assert_eq!(by_name.get("__cuda_arch").map(String::as_str), Some("8.6"));
+    }
+
+    #[test]
+    fn parse_raw_virtual_package_keeps_trailing_segments_in_build_string() {
+        // Extra '=' segments belong to the build string -- as in the
+        // manifest's raw parser -- rather than being silently dropped.
+        let package = parse_raw_virtual_package("__foo=1=special=build").unwrap();
+        assert_eq!(package.build_string, "special=build");
+    }
+
+    #[test]
+    fn into_specs_rejects_unknown_archspec() {
+        let args = VirtualPackageArgs {
+            archspec: Some("x86-64-v3".into()),
+            ..Default::default()
+        };
+        let error = args.into_specs(Platform::Linux64, &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("did you mean 'x86_64_v3'"),
+            "{error}"
+        );
+        // The raw form is validated too, including a trailing segment that
+        // only survives because the parser keeps it.
+        let error = parse_raw_virtual_package("__archspec=0=x86_64_v3=oops").unwrap_err();
+        assert!(
+            error.to_string().contains("not a known archspec"),
+            "{error}"
+        );
     }
 
     #[test]

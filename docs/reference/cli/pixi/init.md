@@ -19,10 +19,12 @@ pixi init [OPTIONS] [PATH]
 <br>**default**: `.`
 
 ## Options
+- <a id="arg---script" href="#arg---script">`--script (-s) <PATH>`</a>
+:  Create a PEP 723 metadata block in a Python script
 - <a id="arg---channel" href="#arg---channel">`--channel (-c) <CHANNEL>`</a>
 :  Channel to use in the workspace
 <br>May be provided more than once.
-- <a id="arg---platform" href="#arg---platform">`--platform (-p) <PLATFORM>`</a>
+- <a id="arg---platform" href="#arg---platform">`--platform (-p) <NEW_PLATFORM>`</a>
 :  Platforms that the workspace supports
 <br>May be provided more than once.
 - <a id="arg---import" href="#arg---import">`--import (-i) <ENVIRONMENT_FILE>`</a>
@@ -30,7 +32,7 @@ pixi init [OPTIONS] [PATH]
 - <a id="arg---format" href="#arg---format">`--format <FORMAT>`</a>
 :  The manifest format to create
 <br>**options**: `pixi`, `pyproject`, `mojoproject`
-- <a id="arg---scm" href="#arg---scm">`--scm (-s) <SCM>`</a>
+- <a id="arg---scm" href="#arg---scm">`--scm <SCM>`</a>
 :  Source Control Management used for this workspace
 <br>**options**: `github`, `gitlab`, `codeberg`
 - <a id="arg---conda-pypi-map" href="#arg---conda-pypi-map">`--conda-pypi-map <CONDA_PYPI_MAP>`</a>
