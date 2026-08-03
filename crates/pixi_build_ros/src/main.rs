@@ -1,9 +1,24 @@
+//! ROS build backend for Pixi.
+//!
+//! Two modes:
+//! - **package.xml** (default when a `package.xml` exists alongside the manifest):
+//!   parse the upstream package.xml, translate rosdep keys to conda packages
+//!   via the embedded `robostack.yaml`, fetch rosdistro metadata. This is
+//!   upstream's flow and `generate_recipe` below is kept verbatim against it —
+//!   keep fork edits inside it minimal and hunk-shaped.
+//! - **pixi-native** (`[package.build.config].mode = "pixi-native"` or
+//!   no `package.xml` present): consume `pixi.toml` directly. ROS2-only.
+//!   Linux-only for ament_cargo. Entirely contained in the `pixi_native`
+//!   module, dispatched to by a single early return.
+
 mod build_script;
 pub mod config;
 mod distro;
+mod globs;
 mod metadata;
 pub mod package_map;
 pub mod package_xml;
+mod pixi_native;
 pub mod workspace_discovery;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -23,13 +38,30 @@ use rattler_build_types::NormalizedKey;
 use rattler_conda_types::{ChannelUrl, Platform};
 
 use crate::build_script::render_build_script;
-use crate::config::{PackageMappingSource, extract_distro_from_channels_list};
+use crate::config::{PackageMappingSource, RosMode, extract_distro_from_channels_list};
 use crate::distro::Distro;
 use crate::metadata::parse_and_render;
 use crate::package_map::{
     load_package_map_data, merge_conditional_lists, package_xml_to_conda_requirements,
 };
 use crate::package_xml::PackageXml;
+
+/// Pick the input format. Explicit config wins; otherwise the presence of a
+/// `package.xml` next to the manifest selects upstream's flow.
+fn resolve_mode(config: &RosBackendConfig, manifest_root: &Path) -> RosMode {
+    if let Some(mode) = config.mode {
+        return mode;
+    }
+    if manifest_root.join("package.xml").exists() {
+        RosMode::PackageXml
+    } else {
+        tracing::info!(
+            "no package.xml found at {} and `mode` unset; defaulting to pixi-native",
+            manifest_root.display()
+        );
+        RosMode::PixiNative
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct RosGenerator {}
@@ -74,6 +106,13 @@ impl GenerateRecipe for RosGenerator {
         } else {
             manifest_path.clone()
         };
+
+        // GR fork: pixi-native consumes pixi.toml directly and shares none of the
+        // package.xml flow below. Dispatch before it so upstream's body stays verbatim.
+        if resolve_mode(config, &manifest_root) == RosMode::PixiNative {
+            return pixi_native::generate(model, config, manifest_root, host_platform, channels)
+                .await;
+        }
 
         // Resolve distro from config or channels
         let distro_name = config
@@ -274,6 +313,21 @@ impl GenerateRecipe for RosGenerator {
         build_items.push(Item::Value(Value::new_template(c_compiler, None)));
         build_items.push(Item::Value(Value::new_template(cxx_compiler, None)));
 
+        // GR fork: ament_cargo packages need the rust toolchain plus the
+        // cargo-ament-build wrapper from this distro's channel. The wrapper has no
+        // upstream package.xml, so it ships as a hand-authored vendor recipe.
+        if package_xml.build_type() == "ament_cargo" {
+            build_items.push(Item::Value(Value::new_concrete(
+                SerializableMatchSpec::from("rust"),
+                None,
+            )));
+            let cargo_ament_build = format!("ros-{distro_name}-cargo-ament-build");
+            build_items.push(Item::Value(Value::new_concrete(
+                SerializableMatchSpec::from(cargo_ament_build.as_str()),
+                None,
+            )));
+        }
+
         // Add host dependencies
         let host_dep_names = ["python", "numpy", "pip", "pkg-config"];
         for dep in &host_dep_names {
@@ -284,13 +338,14 @@ impl GenerateRecipe for RosGenerator {
         }
 
         // Add distro mutex to host and run
-        let mutex_name = distro.ros_distro_mutex_name();
+        // GR fork: pin the mutex so channel rebuilds don't drift across minor bumps.
+        let mutex_spec = format!("{} 0.15.*", distro.ros_distro_mutex_name());
         host_items.push(Item::Value(Value::new_concrete(
-            SerializableMatchSpec::from(mutex_name.as_str()),
+            SerializableMatchSpec::from(mutex_spec.as_str()),
             None,
         )));
         run_items.push(Item::Value(Value::new_concrete(
-            SerializableMatchSpec::from(mutex_name.as_str()),
+            SerializableMatchSpec::from(mutex_spec.as_str()),
             None,
         )));
 
@@ -332,32 +387,12 @@ impl GenerateRecipe for RosGenerator {
         _workdir: impl AsRef<Path>,
         editable: bool,
     ) -> miette::Result<Vec<String>> {
-        let mut globs: Vec<&str> = vec![
-            "**/*.c",
-            "**/*.cpp",
-            "**/*.h",
-            "**/*.hpp",
-            "**/*.rs",
-            "**/*.sh",
-            "package.xml",
-            "setup.py",
-            "setup.cfg",
-            "pyproject.toml",
-            "Makefile",
-            "CMakeLists.txt",
-            "MANIFEST.in",
-            "tests/**/*.py",
-            "docs/**/*.rst",
-            "docs/**/*.md",
-            "launch/**/*.py",
-            "config/*.yaml",
-            "msg/**/*.msg",
-            "srv/**/*.srv",
-            "action/**/*.action",
-        ];
+        // GR fork: the glob lists are shared with the pixi-native flow, so they
+        // live in `globs.rs` rather than inline here.
+        let mut globs: Vec<&str> = globs::ROS_SOURCE_GLOBS.to_vec();
 
         if !editable {
-            globs.extend(["**/*.py", "**/*.pyx"]);
+            globs.extend(globs::ROS_PYTHON_SOURCE_GLOBS);
         }
 
         let mut result: Vec<String> = globs.iter().map(|s| s.to_string()).collect();
@@ -371,7 +406,24 @@ impl GenerateRecipe for RosGenerator {
         &self,
         host_platform: Platform,
     ) -> miette::Result<BTreeMap<NormalizedKey, Vec<Variable>>> {
-        Ok(default_compiler_variants(host_platform))
+        let mut variants = default_compiler_variants(host_platform);
+        // GR fork: pin the GNU compiler on Linux so every ROS package this backend
+        // builds (channel publishes AND local `pixi build`) uses one gcc. Left
+        // unpinned, `compiler('cxx')` floats to the newest gcc and drifts between
+        // builds; prebuilt C++23 std::format then ODR-clashes across the channel
+        // boundary and segfaults at runtime. Kept in lockstep with
+        // ros-dev-tools-meta's consumer-side gcc-15 pin (ros-recipes) — bump both.
+        if host_platform.is_linux() {
+            variants.insert(
+                NormalizedKey::from("c_compiler_version"),
+                vec!["15.2".into()],
+            );
+            variants.insert(
+                NormalizedKey::from("cxx_compiler_version"),
+                vec!["15.2".into()],
+            );
+        }
+        Ok(variants)
     }
 }
 
@@ -420,6 +472,30 @@ mod tests {
 
     fn jazzy_distro() -> Distro {
         Distro::builder("jazzy").build()
+    }
+
+    #[test]
+    fn test_default_variants_pins_gnu_compiler_on_linux() {
+        let linux = RosGenerator::default()
+            .default_variants(Platform::Linux64)
+            .unwrap();
+        assert_eq!(
+            linux.get(&NormalizedKey::from("cxx_compiler_version")),
+            Some(&vec!["15.2".into()])
+        );
+        assert_eq!(
+            linux.get(&NormalizedKey::from("c_compiler_version")),
+            Some(&vec!["15.2".into()])
+        );
+
+        // Non-Linux hosts must not get the GNU version pin.
+        let win = RosGenerator::default()
+            .default_variants(Platform::Win64)
+            .unwrap();
+        assert!(
+            win.get(&NormalizedKey::from("cxx_compiler_version"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -623,7 +699,7 @@ mod tests {
           - numpy
           - pip
           - pkg-config
-          - ros2-distro-mutex
+          - ros2-distro-mutex 0.15.*
         run:
           - ros-jazzy-example-interfaces
           - ros-jazzy-launch-ros
@@ -636,7 +712,7 @@ mod tests {
           - ros-jazzy-rcutils
           - ros-jazzy-rmw
           - ros-jazzy-std-msgs
-          - ros2-distro-mutex
+          - ros2-distro-mutex 0.15.*
         "###);
     }
 
@@ -1286,6 +1362,109 @@ mod tests {
         assert!(
             run_deps.iter().any(|d| d == "ros-noetic-ros-custom2-msgs"),
             "Expected ros-noetic-ros-custom2-msgs in run deps: {run_deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pixi_native_mode_skips_package_xml() {
+        // Pixi-native mode should generate a recipe even with no package.xml present.
+        let model = project_fixture!({
+            "name": "demo",
+            "version": "0.1.0",
+            "targets": {
+                "defaultTarget": {
+                    "hostDependencies": {
+                        "ros-kilted-rclcpp": {"binary": {"version": "*"}}
+                    },
+                    "buildDependencies": {},
+                    "runDependencies": {
+                        "ros-kilted-rclcpp": {"binary": {"version": "*"}}
+                    }
+                },
+                "targets": {}
+            }
+        });
+
+        let mut config = RosBackendConfig::default();
+        config.mode = Some(crate::config::RosMode::PixiNative);
+        config.build_type = Some(crate::config::RosBuildType::AmentCmake);
+        config.distro = Some("kilted".to_string());
+
+        let tmp = tempfile::tempdir().unwrap();
+        // No package.xml written into tmp.
+
+        let recipe = RosGenerator::default()
+            .generate_recipe(
+                &model,
+                &config,
+                tmp.path().to_path_buf(),
+                Platform::Linux64,
+                None,
+                &HashSet::new(),
+                vec![],
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let host_specs: Vec<String> = recipe
+            .recipe
+            .requirements
+            .host
+            .iter()
+            .filter_map(|i| match i {
+                Item::Value(v) => v.as_concrete().map(|s| s.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(host_specs.iter().any(|s| s == "ros-kilted-ros-workspace"));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
+    async fn test_generate_recipe_ament_cargo_injects_rust() {
+        let model = project_fixture!({
+            "name": "cargo_demo",
+            "version": "0.1.0",
+            "targets": { "defaultTarget": {} }
+        });
+
+        let test_data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
+        let generated = generate_recipe_for_fixture(
+            "ament_cargo_minimal.xml",
+            "jazzy",
+            &model,
+            vec![PackageMappingSource::File {
+                path: test_data.join("other_package_map.yaml"),
+            }],
+        )
+        .await;
+
+        let build_specs: Vec<String> = generated
+            .recipe
+            .requirements
+            .build
+            .iter()
+            .filter_map(|item| match item {
+                Item::Value(v) => v.as_concrete().map(|s| s.to_string()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            build_specs.iter().any(|s| s == "rust"),
+            "expected `rust` in build deps, got {:?}",
+            build_specs
+        );
+        assert!(
+            build_specs
+                .iter()
+                .any(|s| s == "ros-jazzy-cargo-ament-build"),
+            "expected `ros-jazzy-cargo-ament-build` in build deps, got {:?}",
+            build_specs
         );
     }
 

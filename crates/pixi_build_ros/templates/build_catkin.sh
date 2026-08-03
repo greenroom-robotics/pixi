@@ -93,6 +93,7 @@ else
 fi
 
 cmake ${CMAKE_ARGS} --compile-no-warning-as-error \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DCMAKE_INSTALL_PREFIX=$PREFIX \
     -DCMAKE_PREFIX_PATH=$PREFIX \
     -DCMAKE_BUILD_TYPE=Release \

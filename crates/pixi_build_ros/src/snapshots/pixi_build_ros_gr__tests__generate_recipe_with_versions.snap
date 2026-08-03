@@ -4,7 +4,7 @@ expression: generated.recipe
 ---
 schema_version: 1
 package:
-  name: custom_ros
+  name: ros-noetic-custom-ros
   version: 0.0.1
 build:
   script: "[script]"
@@ -35,8 +35,16 @@ build:
 requirements:
   build:
     - ros-noetic-catkin
-    - ros-noetic-ros-package
-    - ros-noetic-multi-package
+    - ros-noetic-ros-package <=2.0.0
+    - ros-noetic-ros-package-msgs <=2.0.0
+    - ros-noetic-ros-package2 <2.0.0a0
+    - "qt-main >=5.15.0,<5.16.0"
+    - libgl-devel
+    - libopengl-devel
+    - xorg-libx11
+    - xorg-libxext
+    - tinyxml2 ==10.0.0
+    - asio <10.0.0
     - ninja
     - python
     - setuptools
@@ -51,21 +59,34 @@ requirements:
     - "${{ compiler('cxx') }}"
   host:
     - ros-noetic-catkin
-    - ros-noetic-ros-package
-    - ros-noetic-multi-package
+    - ros-noetic-ros-package <=2.0.0
+    - ros-noetic-ros-package-msgs <=2.0.0
+    - ros-noetic-ros-package2 <2.0.0a0
+    - "qt-main >=5.15.0,<5.16.0"
+    - libgl-devel
+    - libopengl-devel
+    - xorg-libx11
+    - xorg-libxext
+    - tinyxml2 ==10.0.0
+    - asio <10.0.0
     - python
     - numpy
     - pip
     - pkg-config
-    - ros-distro-mutex
+    - ros-distro-mutex 0.15.*
   run:
-    - rich >=10.0
-    - ros-noetic-ros-package
-    - ros-noetic-multi-package
-    - ros-distro-mutex
+    - ros-noetic-ros-package <=2.0.0
+    - ros-noetic-ros-package-msgs <=2.0.0
+    - ros-noetic-ros-package2 <2.0.0a0
+    - "qt-main >=5.15.0,<5.16.0"
+    - libgl-devel
+    - libopengl-devel
+    - xorg-libx11
+    - xorg-libxext
+    - tinyxml2 ==10.0.0
+    - asio <10.0.0
+    - ros-distro-mutex 0.15.*
 about:
-  homepage: "https://test.io/custom_ros"
   summary: Demo
   description: Demo
-  repository: "https://github.com/test/custom_ros"
 extra: {}
