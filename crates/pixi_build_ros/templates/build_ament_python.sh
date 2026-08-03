@@ -33,6 +33,17 @@ if [ -f setup.cfg ] && grep -q "install[-_]scripts" setup.cfg; then
     # letting rattler-build package the previous build's leftovers as well.
     $PYTHON setup.py install --force --prefix="$PREFIX" --install-lib="$SP_DIR" $INSTALL_SCRIPTS_ARG --single-version-externally-managed --record="$RATTLER_BUILD_PACKAGE_FILES"
 
+    # setuptools lists byte-compiled files in --record whether or not it wrote
+    # them, and bytecode generation is off in the build environment. Any missing
+    # path makes rattler-build abort while packaging, so keep only what landed.
+    _kept_files="$(mktemp)"
+    while IFS= read -r _recorded; do
+        if [ -e "$_recorded" ]; then
+            printf '%s\n' "$_recorded"
+        fi
+    done < "$RATTLER_BUILD_PACKAGE_FILES" > "$_kept_files"
+    mv "$_kept_files" "$RATTLER_BUILD_PACKAGE_FILES"
+
     # Remove build artifacts from setup.py install
     rm -rf *.egg-info 2>/dev/null || true
     rm -rf build/ 2>/dev/null || true

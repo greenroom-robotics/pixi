@@ -446,25 +446,46 @@ async fn validate_package_manifest(path: &PathBuf) -> miette::Result<()> {
     // Iterate over the files in the directory to provide a more helpful error
     // of what manifests were found.
     if path.is_dir() {
+        // Collect the directory listing before deciding. Reacting to whichever
+        // entry `read_dir` happens to yield first makes the outcome depend on
+        // filesystem ordering: a directory holding both `pixi.toml` and
+        // `package.xml` (a pixi-native ROS package, where the `package.xml` is
+        // auxiliary rather than the manifest) would be accepted or rejected at
+        // random. Primary manifests therefore win over the backend-specific
+        // rejection below.
+        let mut found: Vec<String> = Vec::new();
         let mut entries = tokio_fs::read_dir(&path).await.into_diagnostic()?;
-
         while let Some(entry) = entries.next_entry().await.into_diagnostic()? {
-            let path = entry.path();
-            if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-                if unsupported_implicit_file_names.contains(&filename) {
-                    return Err(miette::diagnostic!(
-                        help = format!("did you mean {filename}?"),
-                        "the build manifest path '{}' is a directory, please provide the path to the manifest file",
-                        path.display(),
-                    ).into());
-                }
-
-                // we found a supported manifest file
-                // which means that we will let our backend discovery handle it
-                if supported_file_names.contains(&filename) {
-                    return Ok(());
-                }
+            if let Some(filename) = entry.path().file_name().and_then(|f| f.to_str()) {
+                found.push(filename.to_string());
             }
+        }
+
+        // A manifest that can carry a `[package]` section describes the package
+        // on its own; backend discovery takes it from here.
+        let primary_manifests = [WORKSPACE_MANIFEST, PYPROJECT_MANIFEST, MOJOPROJECT_MANIFEST];
+        if found.iter().any(|f| primary_manifests.contains(&f.as_str())) {
+            return Ok(());
+        }
+
+        // Otherwise a backend-specific file cannot be discovered implicitly —
+        // the user has to name it.
+        if let Some(filename) = found
+            .iter()
+            .find(|f| unsupported_implicit_file_names.contains(&f.as_str()))
+        {
+            return Err(miette::diagnostic!(
+                help = format!("did you mean {filename}?"),
+                "the build manifest path '{}' is a directory, please provide the path to the manifest file",
+                path.join(filename).display(),
+            ).into());
+        }
+
+        if found
+            .iter()
+            .any(|f| supported_file_names.contains(&f.as_str()))
+        {
+            return Ok(());
         }
 
         let supported_names = supported_file_names.join(", ");
