@@ -224,6 +224,7 @@ create-tag = { cmd = "python scripts/create_tag.py", description = "Create and p
 extract-version = { cmd = "python scripts/extract_version.py", description = "Print the release version and tag from crates/pixi/Cargo.toml" }
 package-binary = { cmd = "python scripts/package_binary.py", description = "Package a built binary into an archive and stage it" }
 release = { cmd = "python scripts/release.py", description = "Run the release script" }
+release-gr = { cmd = "python scripts/release_gr.py", description = "Cut a pixi-gr fork release (linux-64 + linux-aarch64)" }
 sign-macos = { cmd = "python scripts/sign_macos.py", description = "Codesign and notarize a macOS binary" }
 
 #
