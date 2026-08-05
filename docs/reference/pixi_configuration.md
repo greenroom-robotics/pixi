@@ -364,13 +364,19 @@ e.g. `"127.0.0.1:10000"`.
 An entry is a **grant**: naming a host is the only thing that permits your ambient
 Azure credentials — an `az login` session, `AZURE_STORAGE_*` environment variables,
 a managed identity — to be sent to it. A host with **no** entry is fetched
-anonymously, so an unconfigured private container answers `404` rather than
-leaking a credential to a host you never named. A private channel therefore does
-not resolve until you grant its host:
+anonymously, so an unconfigured private container refuses the read — `401`, or
+`404` on an account that allows public access, which makes a missing grant
+indistinguishable from a missing blob — rather than leaking a credential to a host
+you never named. A private channel therefore does not resolve until you grant its
+host:
 
 ```shell
-pixi config set azure-options.mycompany.blob.core.windows.net.auth true
+pixi config set --global azure-options.mycompany.blob.core.windows.net.auth true
 ```
+
+`--global` is not optional here. Run inside a workspace without it and the entry
+lands in that workspace's `.pixi/config.toml`, where it is then ignored — see the
+warning below.
 
 | Key          | Default   | Meaning                                                                                                           |
 | ------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
