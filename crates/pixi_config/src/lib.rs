@@ -857,6 +857,14 @@ pub struct PyPIConfig {
 // keep compiling.
 pub use rattler_config::config::s3::{S3Options, S3OptionsMap};
 
+// The `azure-options` table, keyed by endpoint authority. Re-exported alongside
+// the option types a caller needs to build an entry, so writing one does not mean
+// depending on `rattler_azure` directly.
+pub use rattler_azure::{
+    Addressing, Auth, AzureEndpoint, AzureEndpointOptions, AzureHost, AzureScheme,
+};
+pub use rattler_config::config::azure::AzureOptionsMap;
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum DetachedEnvironments {
@@ -1194,6 +1202,17 @@ pub struct Config {
     #[serde(skip_serializing_if = "S3OptionsMap::is_empty")]
     pub s3_options: S3OptionsMap,
 
+    /// Per-host grants for `az://` Azure Blob channels.
+    ///
+    /// An entry is the *only* way a host gets a credential: a host with no entry
+    /// is fetched anonymously, so this table is what makes a private container
+    /// readable. **User- and system-level config only** — see
+    /// [`Config::load_with`], which drops the table when it appears in a
+    /// project's `.pixi/config.toml`.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "AzureOptionsMap::is_empty")]
+    pub azure_options: AzureOptionsMap,
+
     /// The option to specify the directory where detached environments are
     /// stored. When using 'true', it defaults to the cache directory.
     /// When using a path, it uses the specified path.
@@ -1297,6 +1316,7 @@ impl Default for Config {
             repodata_config: RepodataConfig::default(),
             pypi_config: PyPIConfig::default(),
             s3_options: S3OptionsMap::default(),
+            azure_options: AzureOptionsMap::default(),
             detached_environments: None,
             pinning_strategy: None,
             shell: ShellConfig::default(),
@@ -1704,6 +1724,9 @@ impl Config {
         // Validate that all configured [cache] paths are absolute.
         self.cache.validate()?;
 
+        // Rejects a grant that would ride cleartext to a routable host.
+        rattler_config::config::Config::validate(&self.azure_options).into_diagnostic()?;
+
         Ok(())
     }
 
@@ -1782,7 +1805,7 @@ impl Config {
             .join(consts::CONFIG_FILE);
 
         match Self::from_path(&local_config_path) {
-            Ok(c) => config = config.merge_config(c),
+            Ok(c) => config = config.merge_config(c.without_project_scoped_grants()),
             Err(e) => tracing::debug!(
                 "Failed to load local config: {} (error: {})",
                 local_config_path.display(),
@@ -1791,6 +1814,29 @@ impl Config {
         }
 
         config
+    }
+
+    /// Drop the config entries a project checkout is not allowed to declare.
+    ///
+    /// `azure-options` is a grant: naming a host in it is what permits the user's
+    /// ambient Azure credentials — an `az login` session, an environment key, a
+    /// managed identity — to be sent there. A cloned repository must not be able
+    /// to name a host and collect them, so the table is honoured only from user-
+    /// and system-level config and dropped here with a warning rather than
+    /// silently, since a project that wrote one is expecting it to work.
+    #[must_use]
+    fn without_project_scoped_grants(mut self) -> Self {
+        for host in self.azure_options.hosts() {
+            tracing::warn!(
+                "ignoring `[azure-options.\"{host}\"]` in the project's {}/{}: an Azure grant lets \
+                 this host receive your Azure credentials, so it may only be declared in your own \
+                 user- or system-level pixi config",
+                consts::PIXI_DIR,
+                consts::CONFIG_FILE,
+            );
+        }
+        self.azure_options = AzureOptionsMap::default();
+        self
     }
 
     /// Load the config from the given path (project root) using the default
@@ -1845,6 +1891,11 @@ impl Config {
             "s3-options.<bucket>.endpoint-url",
             "s3-options.<bucket>.force-path-style",
             "s3-options.<bucket>.region",
+            "azure-options",
+            "azure-options.<host>",
+            "azure-options.<host>.auth",
+            "azure-options.<host>.path-style",
+            "azure-options.<host>.scheme",
             "shell",
             "shell.change-ps1",
             "shell.force-activate",
@@ -1898,6 +1949,13 @@ impl Config {
                     .chain(other.s3_options.0)
                     .collect(),
             ),
+            // A host is granted or not as a whole, so a higher-precedence file
+            // replaces an entry outright rather than merging it field-wise.
+            azure_options: rattler_config::config::Config::merge_config(
+                self.azure_options,
+                &other.azure_options,
+            )
+            .expect("AzureOptionsMap::merge_config is infallible"),
             detached_environments: other.detached_environments.or(self.detached_environments),
             pinning_strategy: other.pinning_strategy.or(self.pinning_strategy),
             shell: self.shell.merge(other.shell),
@@ -2274,6 +2332,81 @@ impl Config {
                         serde_json::de::from_str(&value).into_diagnostic()?;
                     self.s3_options.0.insert(subkey.to_string(), s3_options);
                 }
+            }
+            key if key.starts_with("azure-options") => {
+                if key == "azure-options" {
+                    self.azure_options = match value {
+                        Some(value) => serde_json::de::from_str(&value).into_diagnostic()?,
+                        // Unsetting the whole table revokes every grant, which is
+                        // the safe direction: absent means anonymous.
+                        None => AzureOptionsMap::default(),
+                    };
+                    return Ok(());
+                }
+                let Some(subkey) = key.strip_prefix("azure-options.") else {
+                    return Err(err);
+                };
+
+                // A host always contains dots, so — unlike `s3-options.<bucket>` —
+                // the field cannot be found by splitting on the first one. Split a
+                // trailing segment off only when it names a field; everything else
+                // is the host, quotes and all (`azure-options."host:10000".auth`).
+                const FIELDS: &[&str] = &["auth", "scheme", "path-style"];
+                let (host, field) = match subkey.rsplit_once('.') {
+                    Some((head, tail)) if FIELDS.contains(&tail) => (head, Some(tail)),
+                    _ => (subkey, None),
+                };
+                let host = AzureHost::parse(host.trim_matches('"'))
+                    .map_err(|e| miette!("`{key}` does not name a valid Azure host: {e}"))?;
+
+                let Some(field) = field else {
+                    match value {
+                        Some(value) => {
+                            let options = serde_json::de::from_str(&value).into_diagnostic()?;
+                            self.azure_options.insert(host, options);
+                        }
+                        None => {
+                            self.azure_options.remove(&host);
+                        }
+                    }
+                    return Ok(());
+                };
+
+                // Read-modify-write rather than a mutable borrow: an entry is
+                // `Copy`, and rebuilding it through `AzureEndpointOptions::new`
+                // keeps the type the only thing that can assemble one. An absent
+                // host reads as the defaults, so setting one field on a host with
+                // no entry writes an entry rather than silently doing nothing.
+                let current = self.azure_options.get(&host);
+                let mut auth = current.fetch().auth;
+                let mut endpoint = current.endpoint();
+                match (field, value) {
+                    // Unsetting a field restores its default. Every default is the
+                    // conservative choice, so this can never widen a grant.
+                    ("auth", None) => auth = Auth::default(),
+                    ("scheme", None) => endpoint.scheme = AzureScheme::default(),
+                    ("path-style", None) => endpoint.addressing = Addressing::default(),
+                    ("auth", Some(value)) => {
+                        auth = value.parse::<bool>().into_diagnostic()?.into();
+                    }
+                    ("path-style", Some(value)) => {
+                        endpoint.addressing = value.parse::<bool>().into_diagnostic()?.into();
+                    }
+                    ("scheme", Some(value)) => {
+                        endpoint.scheme = match value.as_str() {
+                            "https" => AzureScheme::Https,
+                            "http" => AzureScheme::Http,
+                            other => {
+                                return Err(miette!(
+                                    "`{key}` must be \"https\" or \"http\", not {other:?}"
+                                ));
+                            }
+                        };
+                    }
+                    _ => return Err(err),
+                }
+                self.azure_options
+                    .insert(host, AzureEndpointOptions::new(auth, endpoint));
             }
             key if key.starts_with(EXPERIMENTAL) => {
                 if key == EXPERIMENTAL {
@@ -2979,6 +3112,14 @@ UNUSED = "unused"
                     force_path_style: false,
                 },
             )])),
+            azure_options: {
+                let mut azure_options = AzureOptionsMap::default();
+                azure_options.insert(
+                    AzureHost::parse("mycompany.blob.core.windows.net").unwrap(),
+                    AzureEndpointOptions::new(Auth::DefaultChain, AzureEndpoint::default()),
+                );
+                azure_options
+            },
             repodata_config: RepodataConfig {
                 default: RepodataChannelConfig {
                     disable_bzip2: Some(true),
@@ -3482,6 +3623,74 @@ UNUSED = "unused"
         assert_eq!(config.pinning_strategy, Some(PinningStrategy::Semver));
 
         config.set("unknown-key", None).unwrap_err();
+    }
+
+    /// An Azure host is full of dots, so `azure-options.<host>.<field>` cannot be
+    /// split the way `s3-options.<bucket>.<field>` is: the field has to be
+    /// recognised by name or the host swallows it (or worse, loses its last label).
+    #[test]
+    fn test_set_azure_options() {
+        let host = AzureHost::parse("mycompany.blob.core.windows.net").unwrap();
+        let mut config = Config::default();
+
+        // The tail is a field name, so the host is everything before it.
+        config
+            .set(
+                "azure-options.mycompany.blob.core.windows.net.auth",
+                Some("true".to_string()),
+            )
+            .unwrap();
+        assert!(config.azure_options.get(&host).fetch().auth.is_granted());
+        assert_eq!(config.azure_options.hosts().collect_vec(), vec![&host]);
+
+        // `net` is not a field name, so this names a host and takes a whole entry.
+        let emulator = AzureHost::parse("127.0.0.1:10000").unwrap();
+        config
+            .set(
+                "azure-options.\"127.0.0.1:10000\"",
+                Some(r#"{"auth": true, "scheme": "http", "path-style": true}"#.to_string()),
+            )
+            .unwrap();
+        let entry = config.azure_options.get(&emulator);
+        assert_eq!(entry.endpoint().scheme, AzureScheme::Http);
+        assert_eq!(entry.endpoint().addressing, Addressing::PathStyle);
+
+        // Unsetting a field restores its default, which for a grant is anonymous.
+        config
+            .set("azure-options.mycompany.blob.core.windows.net.auth", None)
+            .unwrap();
+        assert!(!config.azure_options.get(&host).fetch().auth.is_granted());
+
+        // Unsetting an entry revokes it outright.
+        config
+            .set("azure-options.\"127.0.0.1:10000\"", None)
+            .unwrap();
+        assert!(!config.azure_options.hosts().contains(&emulator));
+
+        // A host that is not a host is an error, not a silently-skipped grant.
+        config
+            .set("azure-options.not a host.auth", Some("true".to_string()))
+            .unwrap_err();
+    }
+
+    /// A grant in a project's `.pixi/config.toml` must not take effect: it would
+    /// let a cloned repository name a host and receive the user's Azure
+    /// credentials.
+    #[test]
+    fn test_project_config_cannot_grant_an_azure_host() {
+        let host = AzureHost::parse("evil.blob.core.windows.net").unwrap();
+        let mut project = Config::default();
+        project
+            .set(
+                "azure-options.evil.blob.core.windows.net.auth",
+                Some("true".to_string()),
+            )
+            .unwrap();
+        assert!(project.azure_options.get(&host).fetch().auth.is_granted());
+
+        let loaded = project.without_project_scoped_grants();
+        assert!(!loaded.azure_options.get(&host).fetch().auth.is_granted());
+        assert!(loaded.azure_options.is_empty());
     }
 
     #[rstest]
