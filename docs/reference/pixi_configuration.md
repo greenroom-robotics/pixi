@@ -355,6 +355,39 @@ credentials from the Pixi authentication storage, see the [S3 section](../deploy
 --8<-- "docs/source_files/pixi_config_tomls/main_config.toml:s3-options"
 ```
 
+### `azure-options`
+
+Per-host configuration for `az://` Azure Blob Storage channels, keyed by the
+endpoint authority exactly as it appears in the channel URL — including a port,
+e.g. `"127.0.0.1:10000"`.
+
+An entry is a **grant**: naming a host is the only thing that permits your ambient
+Azure credentials — an `az login` session, `AZURE_STORAGE_*` environment variables,
+a managed identity — to be sent to it. A host with **no** entry is fetched
+anonymously, so an unconfigured private container answers `404` rather than
+leaking a credential to a host you never named. A private channel therefore does
+not resolve until you grant its host:
+
+```shell
+pixi config set azure-options.mycompany.blob.core.windows.net.auth true
+```
+
+| Key          | Default   | Meaning                                                                                                           |
+| ------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
+| `auth`       | `false`   | Whether credentials may be sent to this host.                                                                     |
+| `scheme`     | `"https"` | The scheme `az://` is rewritten to. `"http"` is for local emulators, and is rejected for a granted routable host.  |
+| `path-style` | `false`   | Take the storage account from the first path segment instead of the first host label. Needed for Azurite.          |
+
+```toml title="config.toml"
+--8<-- "docs/source_files/pixi_config_tomls/main_config.toml:azure-options"
+```
+
+!!! warning "User-level configuration only"
+    `azure-options` is honoured only from your own user- and system-level config.
+    It is ignored — with a warning — in a workspace's `.pixi/config.toml`, because a
+    cloned repository must not be able to name a host and collect your Azure
+    credentials.
+
 ### `concurrency`
 
 Configure multiple settings to limit or extend the concurrency of pixi.
