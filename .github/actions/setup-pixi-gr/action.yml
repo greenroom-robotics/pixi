@@ -8,7 +8,7 @@ inputs:
   version:
     description: pixi-gr release version (see greenroom-robotics/pixi releases).
     required: false
-    default: "0.75.1"
+    default: "0.75.2"
   frozen:
     description: Install from the lockfile without re-solving.
     required: false
