@@ -102,17 +102,24 @@ region = "us-east-1"
 #  --8<-- [end:s3-options]
 
 #  --8<-- [start:azure-options]
-# Naming a host here is what permits credentials to be sent to it. A host with no
-# entry is fetched anonymously.
-[azure-options."mycompany.blob.core.windows.net"]
-auth = true
+# Naming a container here is what permits credentials to be sent for it. A
+# container with no grant is fetched anonymously.
+[azure-options."mycompany.blob.core.windows.net".auth]
+releases = true
+staging = true
+# Leaving a container out of this table says the same thing as writing `false`.
+# The explicit spelling is how this file revokes a grant that a lower-precedence
+# config file made.
+public = false
 
 # A local Azurite emulator: cleartext, and the account is the first path segment
 # rather than the first host label.
 [azure-options."127.0.0.1:10000"]
-auth = true
 scheme = "http"
 path-style = true
+
+[azure-options."127.0.0.1:10000".auth]
+general = true
 #  --8<-- [end:azure-options]
 
 #  --8<-- [start:concurrency]

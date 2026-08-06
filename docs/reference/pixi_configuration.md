@@ -361,28 +361,34 @@ Per-host configuration for `az://` Azure Blob Storage channels, keyed by the
 endpoint authority exactly as it appears in the channel URL — including a port,
 e.g. `"127.0.0.1:10000"`.
 
-An entry is a **grant**: naming a host is the only thing that permits your ambient
-Azure credentials — an `az login` session, `AZURE_STORAGE_*` environment variables,
-a managed identity — to be sent to it. A host with **no** entry is fetched
-anonymously, so an unconfigured private container refuses the read — `401`, or
-`404` on an account that allows public access, which makes a missing grant
-indistinguishable from a missing blob — rather than leaking a credential to a host
-you never named. A private channel therefore does not resolve until you grant its
-host:
+Credentials are granted per **container**, in the entry's `auth` table: naming a
+container is the only thing that permits your ambient Azure credentials — an
+`az login` session, `AZURE_STORAGE_*` environment variables, a managed identity —
+to be sent for it. A container with **no** grant is fetched anonymously, so an
+unconfigured private container refuses the read — `401`, or `404` on an account
+that allows public access, which makes a missing grant indistinguishable from a
+missing blob — rather than leaking a credential to a host you never named. A
+private channel therefore does not resolve until you grant its container:
 
 ```shell
-pixi config set --global azure-options.mycompany.blob.core.windows.net.auth true
+pixi config set --global azure-options.mycompany.blob.core.windows.net.auth.releases true
 ```
+
+The grant is per container rather than per host because Azure assigns access per
+container, so one storage account routinely holds private and anonymous-read
+containers side by side. Signing a request for a public container fails for an
+identity that holds no role on it, so there is deliberately **no** host-wide
+`auth` key to set.
 
 `--global` is not optional here. Run inside a workspace without it and the entry
 lands in that workspace's `.pixi/config.toml`, where it is then ignored — see the
 warning below.
 
-| Key          | Default   | Meaning                                                                                                           |
-| ------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
-| `auth`       | `false`   | Whether credentials may be sent to this host.                                                                     |
-| `scheme`     | `"https"` | The scheme `az://` is rewritten to. `"http"` is for local emulators, and is rejected for a granted routable host.  |
-| `path-style` | `false`   | Take the storage account from the first path segment instead of the first host label. Needed for Azurite.          |
+| Key                | Default   | Meaning                                                                                                           |
+| ------------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
+| `auth.<container>` | `false`   | Whether credentials may be sent for that container on this host.                                                  |
+| `scheme`           | `"https"` | The scheme `az://` is rewritten to. `"http"` is for local emulators, and is rejected for a granted routable host.  |
+| `path-style`       | `false`   | Take the storage account from the first path segment instead of the first host label. Needed for Azurite.          |
 
 ```toml title="config.toml"
 --8<-- "docs/source_files/pixi_config_tomls/main_config.toml:azure-options"

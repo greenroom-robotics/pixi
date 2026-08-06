@@ -245,13 +245,13 @@ pub fn build_reqwest_middleware_stack(
     result.push(Arc::new(S3Middleware::new(s3_config, store)));
 
     // The Azure middleware rewrites `az://{host}/...` requests into Azure Blob
-    // Storage requests and is a no-op for other schemes. Only the hosts named in
-    // `azure-options` are signed: a host with no entry is fetched anonymously, so
-    // an unconfigured private container answers 404 rather than receiving the
-    // user's ambient Azure credentials.
+    // Storage requests and is a no-op for other schemes. Only the containers named
+    // in an `azure-options` entry's `auth` table are signed: a container with no
+    // grant is fetched anonymously, so an unconfigured private container answers
+    // 404 rather than receiving the user's ambient Azure credentials.
     result.push(Arc::new(AzureMiddleware::new(
         client.clone().into_client(),
-        config.azure_options.fetch_options(),
+        config.azure_options.endpoint_options(),
     )));
 
     result.push(Arc::new(
