@@ -47,9 +47,26 @@ fi
 OSX_DEPLOYMENT_TARGET="11.0"
 
 # Added to help make portable builds when using <inttypes.h> in C++ code.
+#
+# `-g` is appended rather than switching CMAKE_BUILD_TYPE to RelWithDebInfo:
+# CMake puts CMAKE_<LANG>_FLAGS_RELEASE (`-O3 -DNDEBUG`) after CMAKE_<LANG>_FLAGS,
+# so `-g` survives and the effective compile is `-O3 -g`. Shipped code keeps
+# exactly the optimisation level it has today; only debug info is added, and
+# that is split back out again after install (see below).
+#
+# -fdebug-prefix-map rewrites $BUILD_PREFIX paths recorded in DWARF to a stable
+# location. conda-forge's activation already maps $SRC_DIR and $PREFIX but not
+# $BUILD_PREFIX, which is where the toolchain and libstdc++ headers live.
+#
+# LDFLAGS is the one knob that reaches every link type: CMake seeds
+# CMAKE_EXE_LINKER_FLAGS, CMAKE_SHARED_LINKER_FLAGS and CMAKE_MODULE_LINKER_FLAGS
+# from it. MODULE matters — rosidl's python extension modules are built with
+# python3_add_library(... MODULE ...) and would get no build-id otherwise, which
+# means no way to key their debug info.
 if [[ $target_platform =~ linux.* ]]; then
-    export CFLAGS="${CFLAGS} -D__STDC_FORMAT_MACROS=1"
-    export CXXFLAGS="${CXXFLAGS} -D__STDC_FORMAT_MACROS=1"
+    export CFLAGS="${CFLAGS} -D__STDC_FORMAT_MACROS=1 -g -fdebug-prefix-map=${BUILD_PREFIX}=/usr/local/src/conda-build-prefix"
+    export CXXFLAGS="${CXXFLAGS} -D__STDC_FORMAT_MACROS=1 -g -fdebug-prefix-map=${BUILD_PREFIX}=/usr/local/src/conda-build-prefix"
+    export LDFLAGS="${LDFLAGS} -Wl,--build-id"
 fi
 
 echo "USING PYTHON_EXECUTABLE=${PYTHON_EXECUTABLE}"
@@ -98,3 +115,48 @@ if [ ! -f "build.ninja" ]; then
 fi
 
 cmake --build . --config $BUILD_TYPE --target install
+
+# Split the debug info back out of every installed ELF into a build-id-keyed
+# tree for a later debuginfod upload, then strip the installed copy. This is
+# what keeps the shipped package the same size it was before `-g` was added.
+#
+# The tree MUST live outside $PREFIX. At this revision the template does not
+# hand rattler-build an explicit file list, so anything new under $PREFIX ends
+# up inside the package.
+#
+# Warnings are written to a file as well as stderr: rattler-build indents build
+# output and GitHub only recognises `::warning::` at column 0, so a later CI
+# step re-emits them from the log.
+if [[ $target_platform =~ linux.* ]]; then
+  debug_dir="${GR_DEBUGINFO_DIR:-/tmp/gr-debuginfo}"
+  _warn() { echo "WARNING: $1" >&2; mkdir -p "$debug_dir"; echo "$PKG_NAME: $1" >>"$debug_dir/warnings.log"; }
+
+  if [ ! -f install_manifest.txt ]; then
+    _warn "no install_manifest.txt; no debug symbols captured"
+  else
+      debug_root="$debug_dir/buildid"
+      # $OBJCOPY/$READELF are the triplet-prefixed binutils from conda's
+      # activation; the bare names keep this working outside a conda build.
+      _objcopy="${OBJCOPY:-objcopy}"
+      _readelf="${READELF:-readelf}"
+      # install_manifest.txt has no trailing newline, so a bare `while read`
+      # discards the last entry — `|| [ -n "$f" ]` picks it up.
+      while IFS= read -r f || [ -n "$f" ]; do
+          [ -f "$f" ] || continue
+          head -c4 "$f" | grep -q $'\x7fELF' || continue
+          id=$("$_readelf" -n "$f" 2>/dev/null | awk '/Build ID:/ {print $NF; exit}')
+          if [ -z "$id" ]; then
+              _warn "no build-id, no symbols will be available: $f"
+              continue
+          fi
+          mkdir -p "$debug_root/$id"
+          # No --add-gnu-debuglink: the debug file is named `debuginfo`, so the
+          # link would only record a useless basename. The build-id is the key.
+          "$_objcopy" --only-keep-debug "$f" "$debug_root/$id/debuginfo"
+          "$_objcopy" --strip-debug "$f"
+          # Copied after stripping so it is byte-identical to what ships, which
+          # is what core dumps will be matched against.
+          cp "$f" "$debug_root/$id/executable"
+      done < install_manifest.txt
+  fi
+fi
