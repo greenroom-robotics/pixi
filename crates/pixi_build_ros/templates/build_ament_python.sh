@@ -2,6 +2,10 @@
 # DO NOT EDIT!
 
 set -eo pipefail
+# An ignored SIGPIPE survives exec, so every compiler, ninja and cmake process
+# below inherits it and sees EPIPE on a doomed log write instead of dying. A
+# build that has already compiled and installed must not fail on its own output.
+trap '' PIPE
 
 # Stage source into a work-dir-local copy and drop a synthesized package.xml
 # next to setup.py. setup.py declares package.xml as a data_files entry, so
