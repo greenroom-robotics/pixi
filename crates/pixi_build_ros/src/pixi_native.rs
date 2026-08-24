@@ -265,6 +265,14 @@ pub async fn generate(
         ] {
             host_items.push(spec(&format!("ros-{distro}-{generator}")));
         }
+        // robostack's rosidl-cmake/rosidl-adapter declare `empy` unbounded, and
+        // conda-forge shipped empy 4.2.1 on 2026-08-20. rosidl-generator-rs
+        // 0.4.11 (robostack's newest) packages msg/rmw.rs.em and srv/rmw.rs.em
+        // with no trailing newline after the closing `}@`, which empy 4 rejects
+        // with `TransientParseError: not enough data to read`. Upstream
+        // rosidl_rust 0.4.12 newline-terminates them; drop this pin once
+        // robostack publishes 0.4.12 or later.
+        host_items.push(spec("empy <4"));
         for runtime in ["rosidl-default-runtime", "rosidl-runtime-rs"] {
             host_items.push(spec(&format!("ros-{distro}-{runtime}")));
             run_items.push(spec(&format!("ros-{distro}-{runtime}")));
@@ -790,6 +798,50 @@ mod tests {
         ] {
             assert!(host.iter().any(|s| s == pkg), "missing in host: {pkg}");
             assert!(run.iter().any(|s| s == pkg), "missing in run: {pkg}");
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_ament_idl_injects_generators_and_pins_empy() {
+        let cfg = cfg_pixi_native(RosBuildType::AmentIdl);
+        let model = model_with_deps(&["ros-kilted-geometry-msgs"], &["ros-kilted-geometry-msgs"]);
+        let recipe = generate(
+            &model,
+            &cfg,
+            PathBuf::from("/tmp/fake"),
+            rattler_conda_types::Platform::Linux64,
+            vec![],
+        )
+        .await
+        .unwrap();
+
+        let (_, host, run) = host_run_concrete(&recipe.recipe);
+        for generator in [
+            "ros-kilted-rosidl-default-generators",
+            "ros-kilted-rosidl-generator-pydantic",
+            "ros-kilted-rosidl-generator-mypy",
+            "ros-kilted-rosidl-generator-rs",
+        ] {
+            assert!(
+                host.iter().any(|s| s == generator),
+                "missing in host: {generator}"
+            );
+        }
+        // Without this bound the solver takes empy 4, which cannot parse
+        // rosidl-generator-rs 0.4.11's templates.
+        assert!(host.iter().any(|s| s == "empy <4"));
+        for runtime in [
+            "ros-kilted-rosidl-default-runtime",
+            "ros-kilted-rosidl-runtime-rs",
+        ] {
+            assert!(
+                host.iter().any(|s| s == runtime),
+                "missing in host: {runtime}"
+            );
+            assert!(
+                run.iter().any(|s| s == runtime),
+                "missing in run: {runtime}"
+            );
         }
     }
 
