@@ -21,7 +21,7 @@ BUILD_DIR=@BUILD_DIR@
 STAGE_DIR="$PWD/src_stage"
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
-tar -C "@SRC_DIR@" --exclude=./.pixi --exclude=./.git -cf - . | tar -C "$STAGE_DIR" -xf -
+tar -C "@SRC_DIR@" --exclude=./.pixi --exclude=./.git --exclude=./build -cf - . | tar -C "$STAGE_DIR" -xf -
 
 cat > "$STAGE_DIR/package.xml" <<'__PIXI_NATIVE_PACKAGE_XML__'
 @PACKAGE_XML_CONTENT@
@@ -119,6 +119,13 @@ if [ ! -f "build.ninja" ]; then
 fi
 
 cmake --build . --config $BUILD_TYPE --target install
+
+# Editors resolve compile_commands.json entries by absolute path, but the
+# build compiles the staged copy — map the paths back to the real tree.
+if [ -f compile_commands.json ]; then
+    mkdir -p "@SRC_DIR@/build"
+    sed "s|$STAGE_DIR|@SRC_DIR@|g" compile_commands.json > "@SRC_DIR@/build/compile_commands.json"
+fi
 
 # Split the debug info back out of every installed ELF into a build-id-keyed
 # tree for a later debuginfod upload, then strip the installed copy. This is
