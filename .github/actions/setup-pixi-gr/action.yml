@@ -13,6 +13,11 @@ inputs:
     description: Install from the lockfile without re-solving.
     required: false
     default: "true"
+  install:
+    description: Whether to run `pixi install [--locked]`.
+    required: false
+    default: "true"
+
 runs:
   using: composite
   steps:
@@ -23,4 +28,5 @@ runs:
         # `pixi global install` writes trampolines here.
         echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
     - shell: bash
-      run: pixi install ${{ inputs.frozen == 'true' && '--frozen' || '' }}
+      if: ${{ inputs.install == 'true' }}
+      run: pixi install ${{ inputs.frozen == 'true' && '--locked' || '' }}
