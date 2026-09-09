@@ -13,6 +13,15 @@ use thiserror::Error;
 
 const INDEX_URL: &str = "https://raw.githubusercontent.com/ros/rosdistro/master/index-v4.yaml";
 
+const DEFAULT_MUTEX_VERSION: &str = "0.15";
+pub const MUTEX_VERSION_ENV: &str = "GR_ROS_DISTRO_MUTEX";
+
+/// The `<major>.<minor>` distro-mutex version pinned into host and run:
+/// `GR_ROS_DISTRO_MUTEX` when set, else this release's default.
+pub fn ros_distro_mutex_version() -> String {
+    std::env::var(MUTEX_VERSION_ENV).unwrap_or_else(|_| DEFAULT_MUTEX_VERSION.to_string())
+}
+
 /// Errors that can occur when fetching ROS distribution info.
 #[derive(Debug, Error, Diagnostic)]
 pub enum DistroError {
