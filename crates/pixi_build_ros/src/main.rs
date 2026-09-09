@@ -279,7 +279,11 @@ async fn generate_recipe_package_xml(
     }
 
     // Add distro mutex to host and run
-    let mutex_spec = format!("{} 0.17.*", distro.ros_distro_mutex_name());
+    let mutex_spec = format!(
+        "{} {}.*",
+        distro.ros_distro_mutex_name(),
+        distro::ros_distro_mutex_version()
+    );
     host_items.push(Item::Value(Value::new_concrete(
         SerializableMatchSpec::from(mutex_spec.as_str()),
         None,
@@ -502,9 +506,10 @@ mod tests {
         let win = RosGenerator::default()
             .default_variants(Platform::Win64)
             .unwrap();
-        assert!(win
-            .get(&NormalizedKey::from("cxx_compiler_version"))
-            .is_none());
+        assert!(
+            win.get(&NormalizedKey::from("cxx_compiler_version"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -708,7 +713,7 @@ mod tests {
           - numpy
           - pip
           - pkg-config
-          - ros2-distro-mutex 0.17.*
+          - ros2-distro-mutex 0.15.*
         run:
           - ros-jazzy-example-interfaces
           - ros-jazzy-launch-ros
@@ -721,7 +726,7 @@ mod tests {
           - ros-jazzy-rcutils
           - ros-jazzy-rmw
           - ros-jazzy-std-msgs
-          - ros2-distro-mutex 0.17.*
+          - ros2-distro-mutex 0.15.*
         "###);
     }
 
