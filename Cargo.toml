@@ -261,7 +261,9 @@ rattler_networking = { version = "0.30", default-features = false, features = [
 ] }
 rattler_package_streaming = { version = "0.27", default-features = false }
 rattler_redaction = { version = "0.2.2", default-features = false }
-rattler_repodata_gateway = { version = "0.33", default-features = false }
+rattler_repodata_gateway = { version = "0.33", default-features = false, features = [
+  "azure",
+] }
 rattler_s3 = { version = "0.2", default-features = false }
 rattler_shell = { version = "0.27", default-features = false }
 rattler_solve = { version = "9.0", default-features = false }
