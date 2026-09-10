@@ -378,6 +378,8 @@ impl GenerateRecipe for RosGenerator {
             .with_env(script_env)
             .with_secrets(model.secrets.iter().cloned().collect());
 
+        config.apply_deprecated_build_number(&mut generated_recipe.recipe);
+
         Ok(generated_recipe)
     }
 
