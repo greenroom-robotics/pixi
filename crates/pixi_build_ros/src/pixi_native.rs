@@ -334,9 +334,9 @@ pub async fn generate(
         .with_env(script_env)
         .with_secrets(model.secrets.iter().cloned().collect());
 
-    // Build number is not handled here: pixi applies manifest-level
-    // `[package.build] build-number` generically as a render-config override
-    // (see `intermediate_backend.rs`), for both code paths.
+    // `[package.build] build-number` is applied by pixi as a render-config
+    // override (see `intermediate_backend.rs`) and takes precedence over this.
+    config.apply_deprecated_build_number(&mut generated.recipe);
 
     if is_noarch {
         generated.recipe.build.noarch = Some(Value::new_concrete(NoArchType::python(), None));
@@ -764,6 +764,29 @@ mod tests {
         assert!(run.iter().any(|s| s == "ros-kilted-ros-workspace"));
         assert!(build.iter().any(|s| s == "cmake"));
         assert!(build.iter().any(|s| s == "ninja"));
+    }
+
+    #[tokio::test]
+    async fn deprecated_config_build_number_is_applied() {
+        let mut cfg = cfg_pixi_native(RosBuildType::AmentCmake);
+        cfg.build_number = Some(7);
+        let model = model_with_deps(&["ros-kilted-rclcpp"], &[]);
+        let recipe = generate(
+            &model,
+            &cfg,
+            PathBuf::from("/tmp/fake"),
+            rattler_conda_types::Platform::Linux64,
+            vec![],
+        )
+        .await
+        .unwrap();
+        let number = recipe
+            .recipe
+            .build
+            .number
+            .as_ref()
+            .and_then(|v| v.as_concrete().copied());
+        assert_eq!(number, Some(7));
     }
 
     #[tokio::test]
