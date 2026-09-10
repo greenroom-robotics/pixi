@@ -52,10 +52,10 @@ use crate::{
         resolve::build_dispatch::{LazyBuildDispatch, UvBuildDispatchParams},
     },
     workspace::{
-        Environment, EnvironmentVars, HasWorkspaceRef, PlatformOverrides, PlatformSource,
-        grouped_environment::GroupedEnvironment,
+        Environment, EnvironmentVars, HasWorkspaceRef, grouped_environment::GroupedEnvironment,
     },
 };
+use pixi_manifest::platform::host::host_baseline;
 
 /// Compare two PyPI index URLs ignoring trailing slashes.
 fn pypi_index_urls_match(a: &Url, b: &Url) -> bool {
@@ -286,6 +286,27 @@ pub(crate) fn pypi_satisfies_requirement(
                                 lock_url: pinned_git_spec.git.to_string(),
                             }
                             .into());
+                        }
+
+                        // The LFS preference must match; uv's `GitLfs` is
+                        // binary, so an absent preference compares as
+                        // disabled on both sides. Only manifest-origin
+                        // requirements carry a trustworthy preference:
+                        // `requires_dist` entries are PEP 508 strings that
+                        // cannot express LFS and would compare as the
+                        // `UV_GIT_LFS` fallback, spuriously invalidating
+                        // the lock on every run.
+                        if origin == RequirementOrigin::Manifest {
+                            let spec_lfs = git.lfs().enabled();
+                            let lock_lfs = pinned_git_spec.source.lfs == Some(true);
+                            if spec_lfs != lock_lfs {
+                                return Err(PlatformUnsat::LockedPyPIGitLfsMismatch {
+                                    name: spec.name.clone().to_string(),
+                                    expected_lfs: spec_lfs,
+                                    found_lfs: lock_lfs,
+                                }
+                                .into());
+                            }
                         }
                         // If the spec uses DefaultBranch, we need to check what the lock has
                         // DefaultBranch in it
@@ -586,10 +607,7 @@ async fn read_local_package_metadata(
     // Get or create cache entry for this environment and host platform. The
     // build prefix is shared across all target platforms, so we key the cache
     // on the *host* platform rather than the target being satisfied.
-    let host_platform = ctx.environment.workspace().host_platform(
-        PlatformSource::Defaults,
-        PlatformOverrides::EnvironmentVariableOverrides,
-    );
+    let host_platform = host_baseline();
     let cache_key =
         BuildCacheKey::new(ctx.environment.name().clone(), host_platform.name().clone());
     let cache = ctx.build_caches.entry(cache_key).or_default().clone();
@@ -714,10 +732,7 @@ async fn read_local_package_metadata(
     let conda_prefix_updater = cache
         .conda_prefix_updater
         .get_or_try_init(|| {
-            let prefix_platform = ctx.environment.workspace().host_platform(
-                PlatformSource::Defaults,
-                PlatformOverrides::EnvironmentVariableOverrides,
-            );
+            let prefix_platform = host_baseline();
             let group = GroupedEnvironment::Environment(ctx.environment.clone());
             let virtual_packages = ctx.environment.virtual_packages(&prefix_platform);
 

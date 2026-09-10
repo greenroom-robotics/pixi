@@ -88,7 +88,7 @@ impl GenerateRecipe for RosGenerator {
         _variants: &HashSet<NormalizedKey>,
         channels: Vec<ChannelUrl>,
         _cache_dir: Option<PathBuf>,
-        workspace_scratch_directory: Option<PathBuf>,
+        _workspace_scratch_directory: Option<PathBuf>,
         workspace_directory: Option<PathBuf>,
         checkout_root: Option<PathBuf>,
     ) -> miette::Result<GeneratedRecipe> {
@@ -128,24 +128,19 @@ impl GenerateRecipe for RosGenerator {
                 )
             })?;
 
-        // Subdirectory inside the workspace scratch dir owned exclusively by this
-        // backend. `pixi-build-ros-v0` lets us bump the cache layout without
-        // colliding with concurrent backends or older cached entries.
-        let http_cache_dir = workspace_scratch_directory
-            .as_deref()
-            .map(|root| root.join("pixi-build-ros-v0").join("http-cache"));
-
-        let distro = Distro::fetch(&distro_name, http_cache_dir.as_deref()).await?;
+        let distro = Distro::new(distro_name);
 
         // Parse package.xml
         let package_xml_path = manifest_root.join("package.xml");
         let package_xml_content = fs::read_to_string(&package_xml_path).into_diagnostic()?;
 
         // Set up ROS environment for condition evaluation
-        let ros_version_str = if distro.is_ros1 { "1" } else { "2" };
         let mut env_vars: HashMap<String, String> = HashMap::new();
-        env_vars.insert("ROS_DISTRO".to_string(), distro_name.clone());
-        env_vars.insert("ROS_VERSION".to_string(), ros_version_str.to_string());
+        env_vars.insert("ROS_DISTRO".to_string(), distro.name.clone());
+        env_vars.insert(
+            "ROS_VERSION".to_string(),
+            distro.version.as_env_value().to_string(),
+        );
         if let Some(user_env) = &config.env {
             for (k, v) in user_env {
                 env_vars.insert(k.clone(), v.clone());
@@ -165,7 +160,7 @@ impl GenerateRecipe for RosGenerator {
 
         let mut generated_recipe = parse_and_render(
             package_xml.clone(),
-            &distro_name,
+            &distro.name,
             model.clone(),
             extra_input_globs.clone(),
             package_mapping_files,
@@ -227,7 +222,7 @@ impl GenerateRecipe for RosGenerator {
                 &discovery.packages,
                 &package_xml.name,
                 &manifest_root,
-                &distro_name,
+                &distro.name,
             );
 
             // Apply per-class: a manual entry in the model for the same conda
@@ -321,7 +316,7 @@ impl GenerateRecipe for RosGenerator {
                 SerializableMatchSpec::from("rust"),
                 None,
             )));
-            let cargo_ament_build = format!("ros-{distro_name}-cargo-ament-build");
+            let cargo_ament_build = format!("ros-{}-cargo-ament-build", distro.name);
             build_items.push(Item::Value(Value::new_concrete(
                 SerializableMatchSpec::from(cargo_ament_build.as_str()),
                 None,
@@ -339,7 +334,7 @@ impl GenerateRecipe for RosGenerator {
 
         // Add distro mutex to host and run
         // GR fork: pin the mutex so channel rebuilds don't drift across minor bumps.
-        let mutex_spec = format!("{} 0.15.*", distro.ros_distro_mutex_name());
+        let mutex_spec = format!("{} 0.15.*", distro.version.mutex_package_name());
         host_items.push(Item::Value(Value::new_concrete(
             SerializableMatchSpec::from(mutex_spec.as_str()),
             None,
@@ -357,16 +352,16 @@ impl GenerateRecipe for RosGenerator {
 
         // Generate build script
         let build_type = package_xml.build_type();
-        let build_script_content = render_build_script(&build_type, &distro_name, &manifest_root)?;
+        let build_script_content = render_build_script(&build_type, &distro.name, &manifest_root)?;
 
         let mut script_env: indexmap::IndexMap<String, Value<String>> = indexmap::IndexMap::new();
         script_env.insert(
             "ROS_DISTRO".to_string(),
-            Value::new_concrete(distro_name.clone(), None),
+            Value::new_concrete(distro.name.clone(), None),
         );
         script_env.insert(
             "ROS_VERSION".to_string(),
-            Value::new_concrete(ros_version_str.to_string(), None),
+            Value::new_concrete(distro.version.as_env_value().to_string(), None),
         );
         if let Some(user_env) = &config.env {
             for (k, v) in user_env {
@@ -374,9 +369,15 @@ impl GenerateRecipe for RosGenerator {
             }
         }
 
-        generated_recipe.recipe.build.script = Script::from_content(build_script_content)
-            .with_env(script_env)
-            .with_secrets(model.secrets.iter().cloned().collect());
+        *generated_recipe
+            .recipe
+            .build
+            .plan
+            .script_mut()
+            .expect("generated recipes use script mode") =
+            Script::from_content(build_script_content)
+                .with_env(script_env)
+                .with_secrets(model.secrets.iter().cloned().collect());
 
         Ok(generated_recipe)
     }
@@ -471,7 +472,7 @@ mod tests {
     }
 
     fn jazzy_distro() -> Distro {
-        Distro::builder("jazzy").build()
+        Distro::new("jazzy")
     }
 
     #[test]
@@ -717,7 +718,6 @@ mod tests {
     }
 
     /// Helper to generate a recipe from a package.xml fixture.
-    /// Uses Distro::fetch which requires network access.
     async fn generate_recipe_for_fixture(
         package_xml_name: &str,
         distro_name: &str,
@@ -756,7 +756,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_recipe_includes_project_run_dependency() {
         let model = project_fixture!({
             "name": "custom_ros",
@@ -881,7 +880,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_condition_evaluation_ros2_default() {
         let generated = generate_conditional_recipe("jazzy", None).await;
         insta::assert_yaml_snapshot!(filter_conditional_deps(&generated, "jazzy"), @r###"
@@ -894,7 +892,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_condition_evaluation_ros1_default() {
         let generated = generate_conditional_recipe("noetic", None).await;
         insta::assert_yaml_snapshot!(filter_conditional_deps(&generated, "noetic"), @r###"
@@ -907,7 +904,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_condition_evaluation_ros2_override_to_ros1() {
         let env = indexmap::IndexMap::from([
             ("ROS_VERSION".to_string(), "1".to_string()),
@@ -924,7 +920,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_generate_recipe_with_versions() {
         let model = project_fixture!({
             "targets": { "defaultTarget": {} }
@@ -948,7 +943,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_generate_recipe_with_mutex_version() {
         let model = project_fixture!({
             "name": "custom_ros",
@@ -994,7 +988,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_generate_recipe_with_versions_in_model_and_package() {
         let model = project_fixture!({
             "name": "custom_ros",
@@ -1034,7 +1027,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_generate_recipe_with_explicit_package_xml_path() {
         let model = project_fixture!({
             "targets": { "defaultTarget": {} }
@@ -1081,7 +1073,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_config_auto_detects_distro_from_channel() {
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_path = temp_dir.path();
@@ -1127,7 +1118,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_config_explicit_distro_overrides_channel() {
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_path = temp_dir.path();
@@ -1250,7 +1240,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_generate_recipe_with_custom_ros() {
         let model = project_fixture!({
             "targets": { "defaultTarget": {} }
@@ -1311,7 +1300,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(feature = "slow_integration_tests"), ignore)]
     async fn test_generate_recipe_with_inline_package_mappings() {
         let model = project_fixture!({
             "targets": { "defaultTarget": {} }

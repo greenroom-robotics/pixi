@@ -5,6 +5,349 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+### [0.80.0] - 2026-09-07
+#### ✨ Highlights
+
+Pixi now has experimental support for `conda-script`. Conda scripts let you write scripts in any language, with dependencies and instructions for running them included in the same file.
+Pixi solves the environment, caches it, and runs the script without requiring a separate workspace.
+
+For example, an R script can now be self-contained:
+
+```r
+# /// conda-script
+# channels = ["https://prefix.dev/conda-forge"]
+# entrypoint = "Rscript ${SCRIPT}"
+#
+# [dependencies]
+# r-base = "*"
+# r-jsonlite = "*"
+# /// end-conda-script
+library(jsonlite)
+writeLines(toJSON(list(hello = "pixi"), auto_unbox = TRUE))
+```
+
+Or compile and run a C++ file with Conda-provided dependencies:
+
+```cpp
+// /// conda-script
+// channels = ["https://prefix.dev/conda-forge"]
+// entrypoint = "g++ -o ${CACHE}/hello ${SCRIPT} -lfmt && ${CACHE}/hello"
+//
+// [dependencies]
+// gxx = "*"
+// fmt = "*"
+// /// end-conda-script
+#include <fmt/core.h>
+
+int main() {
+    fmt::print("Hello from pixi!\n");
+}
+```
+
+First enable the experimental configuration with:
+
+```shell
+pixi config set experimental.conda-script true --global
+```
+
+Then, run them with:
+
+```shell
+pixi run --script hello.R
+pixi run --script hello.cpp
+```
+
+You can also create and manage these scripts with `pixi init --script`, `pixi add --script`, `pixi remove --script`, `pixi lock --script`, and the other script-aware commands.
+
+#### Added
+
+- Add experimental `conda-script` support by @Hofer-Julian in [#6907](https://github.com/prefix-dev/pixi/pull/6907), [#6908](https://github.com/prefix-dev/pixi/pull/6908), [#6909](https://github.com/prefix-dev/pixi/pull/6909), [#6928](https://github.com/prefix-dev/pixi/pull/6928), [#6929](https://github.com/prefix-dev/pixi/pull/6929), and [#6943](https://github.com/prefix-dev/pixi/pull/6943). This includes the metadata model, cross-platform entrypoint shell, `pixi run --script`, `pixi init --script`, dependency editing, and shared `tool.pixi` support across script formats.
+
+#### Documentation
+
+- Document `conda-script` files by @Hofer-Julian in [#6911](https://github.com/prefix-dev/pixi/pull/6911)
+
+
+### [0.79.0] - 2026-09-03
+#### ✨ Highlights
+
+Pixi now has better support for RISC-V by setting the default virtual packages.
+
+And we've extended the CLI to include `pixi install --script` and `pixi workspace dependencies add`.
+
+#### Added
+
+- Add `pixi workspace dependencies` CLI by @ruben-arts in [#6917](https://github.com/prefix-dev/pixi/pull/6917)
+- Install script environments without running by @manzt in [#6923](https://github.com/prefix-dev/pixi/pull/6923)
+- Set `__glibc` default to 2.39 on linux-riscv64 by @pavelzw in [#6914](https://github.com/prefix-dev/pixi/pull/6914)
+
+
+#### Changed
+
+- Restore static MSVC CRT in Windows builds by @baszalmstra in [#6919](https://github.com/prefix-dev/pixi/pull/6919)
+
+
+#### Documentation
+
+- Mention named platforms in pixi-pack by @pavelzw in [#6927](https://github.com/prefix-dev/pixi/pull/6927)
+
+
+#### Fixed
+
+- Bump astral_async_http_range_reader to 0.11.1 by @baszalmstra in [#6941](https://github.com/prefix-dev/pixi/pull/6941)
+
+
+
+### [0.78.0] - 2026-08-28
+#### ✨ Highlights
+
+- You can now use the CLI to add path dependencies with the following command:
+  ```shell
+  pixi add --path ~/dev/pixi pixi
+  pixi add --path ~/dev/vinca vinca --pypi
+  pixi add --path ~/dev/ros_ws/src/common/package.xml ros-jazzy-common
+  ```
+- Pixi now can also share the configuration with rattler-based tools like `rattler-build` and `rattler-index`.
+- The PEP 723 script support has been improved with better caching and resolution of scripts.
+
+#### Added
+
+- Write manifest platform names instead of pN aliases by @ruben-arts in [#6885](https://github.com/prefix-dev/pixi/pull/6885)
+- Rework the terminal output by @Hofer-Julian in [#6869](https://github.com/prefix-dev/pixi/pull/6869)
+- Read the shared config layer of rattler-based tools by @Hofer-Julian in [#6776](https://github.com/prefix-dev/pixi/pull/6776)
+- Cache and update script resolutions by @manzt in [#6893](https://github.com/prefix-dev/pixi/pull/6893)
+- Honor the shared `index-config` when indexing a channel by @Hofer-Julian in [#6896](https://github.com/prefix-dev/pixi/pull/6896)
+- Add `--path` to the `pixi add` command by @ruben-arts in [#6904](https://github.com/prefix-dev/pixi/pull/6904)
+
+#### Changed
+
+- Solve scripts against the host's virtual packages by @Hofer-Julian in [#6865](https://github.com/prefix-dev/pixi/pull/6865)
+- Replace the distro index fetch with a static mapping by @Hofer-Julian in [#6881](https://github.com/prefix-dev/pixi/pull/6881)
+- Drop unused `InstallChange` helpers by @Hofer-Julian in [#6897](https://github.com/prefix-dev/pixi/pull/6897)
+- Pin the ROS fixture's macOS compiler to unbreak CI by @baszalmstra in [#6906](https://github.com/prefix-dev/pixi/pull/6906)
+
+#### Fixed
+
+- Group legacy purl fallback traces by @baszalmstra in [#6886](https://github.com/prefix-dev/pixi/pull/6886)
+- Solve lockless scripts in `pixi workspace platform` by @Hofer-Julian in [#6882](https://github.com/prefix-dev/pixi/pull/6882)
+- Show progress for `pixi add` and other commands that solve by @Hofer-Julian in [#6892](https://github.com/prefix-dev/pixi/pull/6892)
+
+
+### [0.77.1] - 2026-08-24
+
+#### Added
+
+- Add `pixi workspace preview` subcommand by @ruben-arts in [#6859](https://github.com/prefix-dev/pixi/pull/6859)
+- Update rattler, rattler-build, minijinja, and display channel notices by @wolfv in [#6852](https://github.com/prefix-dev/pixi/pull/6852)
+- Add one consistent API for detecting host machine by @Hofer-Julian in [#6864](https://github.com/prefix-dev/pixi/pull/6864)
+
+#### Changed
+
+- Use .mojoc with precompile by @sstadick in [#6860](https://github.com/prefix-dev/pixi/pull/6860)
+- Render lists in the generated CLI docs by @Hofer-Julian in [#6868](https://github.com/prefix-dev/pixi/pull/6868)
+
+#### Documentation
+
+- Fix lists that render as plain text by @Hofer-Julian in [#6871](https://github.com/prefix-dev/pixi/pull/6871)
+- Add a social card for link previews by @Hofer-Julian in [#6876](https://github.com/prefix-dev/pixi/pull/6876)
+
+#### Fixed
+
+- Remove backends channel from pixi repo by @Hofer-Julian in [#6862](https://github.com/prefix-dev/pixi/pull/6862)
+- Avoid rebuilds for mtime-only source changes by @baszalmstra in [#6703](https://github.com/prefix-dev/pixi/pull/6703)
+
+### [0.77.0] - 2026-08-18
+#### ✨ Highlights
+
+This release includes the API update for the backends such that we support `pin-compatible` and `pin-subpackage` specs in package manifests. For example:
+
+```toml
+# Pin subpackage `mypkg` to the same version as the package itself, but allow any compatible version of `mypkg` to be used.
+[package]
+name = "mypkg"
+
+[package.run-exports.weak]
+mypkg = { pin-subpackage = { upper-bound = "x.x" } }
+
+# Pin `boltons` to a compatible version.
+[package.host-dependencies]
+boltons = ">=2,<3"
+
+[package.run-dependencies]
+boltons = { pin-compatible = true }
+```
+
+Note that this is a `pixi-build-api-version` update to `v7`.
+
+Also, you can now modify the workspace activation with the new `pixi workspace activation` subcommand.
+
+#### Added
+
+- Pixi search with wildcard by default by @ruben-arts in [#6791](https://github.com/prefix-dev/pixi/pull/6791)
+- Add `pixi workspace activation ...` cli subcommand. by @ruben-arts in [#6815](https://github.com/prefix-dev/pixi/pull/6815)
+- Honor CONDA_OVERRIDE_ARCHSPEC by @hunger in [#6820](https://github.com/prefix-dev/pixi/pull/6820)
+- Support `pin-compatible` and `pin-subpackage` specs in package manifests by @Hofer-Julian in [#6738](https://github.com/prefix-dev/pixi/pull/6738)
+
+#### Changed
+
+- Saturate out-of-range cutoffs instead of panicking by @zach-marto in [#6794](https://github.com/prefix-dev/pixi/pull/6794)
+
+#### Documentation
+
+- Suggest constraints not dependencies by @C-nit in [#6790](https://github.com/prefix-dev/pixi/pull/6790)
+- Fix rich platform claim by @Hofer-Julian in [#6829](https://github.com/prefix-dev/pixi/pull/6829)
+
+#### Fixed
+
+- Dedup paths yielded by the glob walk by @ruben-arts in [#6811](https://github.com/prefix-dev/pixi/pull/6811)
+- Treat corrupt task-cache JSON as a cache miss by @myukitty in [#6824](https://github.com/prefix-dev/pixi/pull/6824)
+- Honor CONDA_OVERRIDE_* in the publish build and host solves by @bretttully in [#6826](https://github.com/prefix-dev/pixi/pull/6826)
+- Help users with better help messages by @ruben-arts in [#6821](https://github.com/prefix-dev/pixi/pull/6821)
+- Scope target activation to the platform a run targets by @ruben-arts in [#6822](https://github.com/prefix-dev/pixi/pull/6822)
+- Enable `pixi_build_types` feature on `pixi_spec` in type conversions by @Hofer-Julian in [#6853](https://github.com/prefix-dev/pixi/pull/6853)
+
+#### Refactor
+
+- Use matchspecs for requirements in rich platforms by @hunger in [#6827](https://github.com/prefix-dev/pixi/pull/6827)
+
+
+#### New Contributors
+* @Timple made their first contribution in [#6831](https://github.com/prefix-dev/pixi/pull/6831)
+* @randyzwitch made their first contribution in [#6833](https://github.com/prefix-dev/pixi/pull/6833)
+* @bretttully made their first contribution in [#6826](https://github.com/prefix-dev/pixi/pull/6826)
+* @myukitty made their first contribution in [#6824](https://github.com/prefix-dev/pixi/pull/6824)
+* @zach-marto made their first contribution in [#6794](https://github.com/prefix-dev/pixi/pull/6794)
+* @C-nit made their first contribution in [#6790](https://github.com/prefix-dev/pixi/pull/6790)
+
+### [0.76.2] - 2026-08-10
+#### ✨ Highlights
+
+This release features better logging and a few bug fixes.
+
+#### Added
+
+- Add logging about why pixi build has a cache miss by @baszalmstra in [#6784](https://github.com/prefix-dev/pixi/pull/6784)
+
+
+#### Changed
+
+- Log CEP-42 user-order conflicts at debug level by @hunger in [#6778](https://github.com/prefix-dev/pixi/pull/6778)
+- Small fixes to better handle paths containing spaces by @hunger in [#6779](https://github.com/prefix-dev/pixi/pull/6779)
+
+
+#### Documentation
+
+- Split `prepare-docs` into tasks with dependencies by @Hofer-Julian in [#6757](https://github.com/prefix-dev/pixi/pull/6757)
+- Better organize the CLI nav sections by @Hofer-Julian in [#6768](https://github.com/prefix-dev/pixi/pull/6768)
+- Clarify pixi search channels by @ytausch in [#6774](https://github.com/prefix-dev/pixi/pull/6774)
+
+
+#### Fixed
+
+- Wasm example by @wolfv in [#6777](https://github.com/prefix-dev/pixi/pull/6777)
+- Scope the build source check to the package that declares it by @baszalmstra in [#6783](https://github.com/prefix-dev/pixi/pull/6783)
+
+
+#### Removed
+
+- Remove stray `py-pixi-build-backend` `Cargo.lock` by @Hofer-Julian in [#6758](https://github.com/prefix-dev/pixi/pull/6758)
+
+
+#### Style
+
+- Use TOML 1.1 multi-line inline tables in `pixi.toml` by @Hofer-Julian in [#6761](https://github.com/prefix-dev/pixi/pull/6761)
+
+
+
+### [0.76.1] - 2026-08-04
+#### ✨ Highlights
+
+This release features an improved `pixi task list` and a revamped docs page based on Zensical.
+
+#### Changed
+
+- Correct `task list` runnability and show every task by @hunger in [#6367](https://github.com/prefix-dev/pixi/pull/6367)
+
+
+#### Documentation
+
+- Switch from mkdocs to zensical by @Hofer-Julian in [#6572](https://github.com/prefix-dev/pixi/pull/6572)
+
+
+#### Fixed
+
+- Honour `editable = true` in transitive `[tool.uv.sources]` at install time by @earlybard in [#6730](https://github.com/prefix-dev/pixi/pull/6730)
+
+
+#### New Contributors
+* @earlybard made their first contribution in [#6730](https://github.com/prefix-dev/pixi/pull/6730)
+
+### [0.76.0] - 2026-08-03
+#### ✨ Highlights
+
+A single Python file can now carry its own environment. Pixi reads [PEP 723](https://packaging.python.org/en/latest/specifications/inline-script-metadata/) inline metadata, and `--script` works on `init`, `run`, `add`, `remove`, `lock`, `list`, `tree`, and `workspace export`.
+
+```python title="hello.py"
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["rich>=13.9.2"]
+# ///
+import rich
+
+rich.print("Hi from [bold magenta]hello.py[/bold magenta]!")
+```
+
+`pixi run --script hello.py` is the whole setup: no `pixi.toml`, no `.pixi` folder, and no lock file unless you ask for one with `pixi lock --script`.
+
+PEP 723 only covers Python and PyPI, so Pixi reads `tool.pixi` for the rest. This greatly extends the script's capabilities, for example to add conda dependencies:
+
+```python title="earthquakes.py"
+# /// script
+# dependencies = ["httpx"]
+# [tool.pixi.workspace]
+# channels = ["conda-forge"]
+# [tool.pixi.dependencies]
+# gdal = "*"
+# ///
+```
+
+`pixi init --script`, `pixi add --script <file> gdal`, and `pixi add --script <file> --pypi httpx` write that block for you. Scripts don't have to be local either: `pixi run --script` takes a URL, a [Gist page](https://gist.github.com/ruben-arts/596390c215bdd7d2578e593b5309d68e) (that one builds CPython 3.16 from git first), or `-` to read from stdin.
+
+Thanks @manzt for building this out across five PRs, see the [standalone scripts docs](https://pixi.prefix.dev/v0.76.0/python/scripts/) for the rest. This release also adds [`[package.run-exports]`](https://pixi.prefix.dev/v0.76.0/reference/pixi_manifest/#run-exports), an `lfs` field for git dependencies, and configurable channel priority.
+
+#### Added
+
+- Support PEP 723 scripts with `--script` by @manzt in [#6648](https://github.com/prefix-dev/pixi/pull/6648)
+- Support PEP 723 scripts in `pixi list` by @manzt in [#6726](https://github.com/prefix-dev/pixi/pull/6726)
+- Support `[package.run-exports]` in package manifests by @Hofer-Julian in [#6696](https://github.com/prefix-dev/pixi/pull/6696)
+- Run PEP 723 scripts from URLs by @manzt in [#6728](https://github.com/prefix-dev/pixi/pull/6728)
+- Resolve GitHub Gist scripts by @manzt in [#6739](https://github.com/prefix-dev/pixi/pull/6739)
+- Run PEP 723 scripts from standard input by @manzt in [#6740](https://github.com/prefix-dev/pixi/pull/6740)
+- Update rattler and support flexible channel priority by @Hofer-Julian in [#6743](https://github.com/prefix-dev/pixi/pull/6743)
+- Add `lfs` field to git dependencies by @Hofer-Julian in [#6744](https://github.com/prefix-dev/pixi/pull/6744)
+
+
+#### Changed
+
+- Point the uv cache at the pixi cache directory by @wolfv in [#6712](https://github.com/prefix-dev/pixi/pull/6712)
+- Resolve the target subdir to the declared workspace platform by @wolfv in [#6715](https://github.com/prefix-dev/pixi/pull/6715)
+- Strip ANSI escapes from rendered diagnostics in snapshots by @ruben-arts in [#6735](https://github.com/prefix-dev/pixi/pull/6735)
+
+
+#### Documentation
+
+- Make more use of the rich platform syntax by @ruben-arts in [#6711](https://github.com/prefix-dev/pixi/pull/6711)
+
+
+#### Fixed
+
+- Force reinstall with setuptools in ros backend by @ruben-arts in [#6713](https://github.com/prefix-dev/pixi/pull/6713)
+- Fix pre-commit during backends release script by @lucascolley in [#6719](https://github.com/prefix-dev/pixi/pull/6719)
+
+
+#### New Contributors
+* @manzt made their first contribution in [#6740](https://github.com/prefix-dev/pixi/pull/6740)
+
 ### [0.75.0] - 2026-07-29
 #### ✨ Highlights
 

@@ -13,7 +13,8 @@ use pixi_build_backend::generated_recipe::{DefaultMetadataProvider, GeneratedRec
 use pixi_build_types::{ProjectModel, Target};
 use rattler_build_jinja::JinjaTemplate;
 use rattler_build_recipe::stage0::{
-    Conditional, Item, JinjaExpression, NestedItemList, Script, SerializableMatchSpec, Value,
+    BuildPlan, Conditional, Item, JinjaExpression, NestedItemList, Script, SerializableMatchSpec,
+    Value,
 };
 use rattler_conda_types::{ChannelUrl, NoArchType, Platform};
 use thiserror::Error;
@@ -330,9 +331,11 @@ pub async fn generate(
         }
     }
 
-    generated.recipe.build.script = Script::from_content(script_content)
-        .with_env(script_env)
-        .with_secrets(model.secrets.iter().cloned().collect());
+    generated.recipe.build.plan = BuildPlan::Script(Box::new(
+        Script::from_content(script_content)
+            .with_env(script_env)
+            .with_secrets(model.secrets.iter().cloned().collect()),
+    ));
 
     // Build number is not handled here: pixi applies manifest-level
     // `[package.build] build-number` generically as a render-config override
