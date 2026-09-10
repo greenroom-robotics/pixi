@@ -82,9 +82,26 @@ pub struct RosBackendConfig {
     /// iterating on the rest of the workspace.
     #[serde(default)]
     pub ignore_workspace_sources: bool,
+
+    /// Deprecated: use `[package.build] build-number`, which pixi applies as a
+    /// render override and which wins when both are set.
+    pub build_number: Option<u64>,
 }
 
 impl RosBackendConfig {
+    /// Apply the deprecated `build-number` config to `recipe`, warning when set.
+    pub fn apply_deprecated_build_number(
+        &self,
+        recipe: &mut rattler_build_recipe::stage0::SingleOutputRecipe,
+    ) {
+        if let Some(n) = self.build_number {
+            tracing::warn!(
+                "`build-number` under `[package.build.config]` is deprecated; move it to `[package.build] build-number`"
+            );
+            recipe.build.number = Some(rattler_build_recipe::stage0::Value::new_concrete(n, None));
+        }
+    }
+
     /// Get file paths from all package mapping sources that came from files.
     pub fn get_package_mapping_file_paths(&self) -> Vec<PathBuf> {
         self.extra_package_mappings
@@ -131,6 +148,7 @@ impl BackendConfig for RosBackendConfig {
             prefix_with_distro: target_config.prefix_with_distro.or(self.prefix_with_distro),
             ignore_workspace_sources: target_config.ignore_workspace_sources
                 || self.ignore_workspace_sources,
+            build_number: target_config.build_number.or(self.build_number),
         })
     }
 }
