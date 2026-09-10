@@ -112,13 +112,12 @@ staging = true
 # config file made.
 public = false
 
-# A local Azurite emulator: cleartext, and the account is the first path segment
-# rather than the first host label.
-[azure-options."127.0.0.1:10000"]
+# A local Azurite emulator: cleartext, and the `/account` in the key says the
+# storage account is the first path segment rather than the first host label.
+[azure-options."127.0.0.1:10000/devstoreaccount1"]
 scheme = "http"
-path-style = true
 
-[azure-options."127.0.0.1:10000".auth]
+[azure-options."127.0.0.1:10000/devstoreaccount1".auth]
 general = true
 #  --8<-- [end:azure-options]
 

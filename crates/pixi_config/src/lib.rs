@@ -858,47 +858,42 @@ pub struct PyPIConfig {
 // keep compiling.
 pub use rattler_config::config::s3::{S3Options, S3OptionsMap};
 
-// The `azure-options` table, keyed by endpoint authority. Re-exported alongside
-// the option types a caller needs to build an entry, so writing one does not mean
-// depending on `rattler_azure` directly.
-pub use rattler_azure::{
-    Addressing, Auth, AzureEndpoint, AzureEndpointOptions, AzureHost, AzureScheme, ContainerName,
-};
+// The `azure-options` table, keyed by endpoint. Re-exported alongside the option
+// types a caller needs to build an entry, so writing one does not mean depending
+// on `rattler_azure` directly.
+pub use rattler_azure::{Auth, AzureEndpointKey, AzureEndpointOptions, AzureScheme, ContainerName};
 pub use rattler_config::config::azure::AzureOptionsMap;
 
-/// The part of an `azure-options.<host>…` config key that follows the host.
+/// The part of an `azure-options.<endpoint>…` config key that follows the endpoint.
 ///
-/// An Azure host is full of dots, so — unlike `s3-options.<bucket>.<field>` — the
+/// An endpoint key is full of dots, so — unlike `s3-options.<bucket>.<field>` — the
 /// field cannot be found by splitting on the first one; it has to be peeled off the
-/// end by name, or the host swallows it (or worse, loses its last label).
+/// end by name, or the endpoint swallows it (or worse, loses its last label).
 ///
 /// There is deliberately no variant for a bare `auth`. A grant belongs to one
 /// container, so the path only exists as a table of them, and the one edit whose
 /// blast radius would be every container on the account — including containers
 /// created after it was written — has nowhere to land.
 enum AzureConfigField {
-    /// `<host>.auth.<container>` — whether that container may be sent credentials.
+    /// `<endpoint>.auth.<container>` — whether that container may be sent credentials.
     Auth(ContainerName),
-    /// `<host>.scheme` — the scheme `az://` is rewritten to.
+    /// `<endpoint>.scheme` — the scheme `az://` is rewritten to.
     Scheme,
-    /// `<host>.path-style` — where the storage account name is found in the URL.
-    PathStyle,
 }
 
 impl AzureConfigField {
-    /// Split an `azure-options.` subkey into the host it names and the field it
+    /// Split an `azure-options.` subkey into the endpoint it names and the field it
     /// addresses, if any.
     ///
     /// Neither a field name nor a container name can contain a dot, so a tail of
     /// one or two segments is enough to recognise; everything before it is the
-    /// host, quotes and all (`"host:10000".auth.releases`).
+    /// endpoint, quotes and all (`"host:10000/account".auth.releases`).
     fn split(subkey: &str) -> miette::Result<(&str, Option<Self>)> {
         let Some((head, tail)) = subkey.rsplit_once('.') else {
             return Ok((subkey, None));
         };
         match tail {
             "scheme" => return Ok((head, Some(Self::Scheme))),
-            "path-style" => return Ok((head, Some(Self::PathStyle))),
             "auth" => {
                 return Err(miette!(
                     "`azure-options.{head}.auth` is a table of containers, not a value. Grant one \
@@ -909,13 +904,13 @@ impl AzureConfigField {
             _ => {}
         }
         // Nothing recognisable at the end, so the tail is a container name only if
-        // the segment before it is `auth`; otherwise the whole subkey is the host.
+        // the segment before it is `auth`; otherwise the whole subkey is the endpoint.
         match head.rsplit_once('.') {
-            Some((host, "auth")) => {
+            Some((endpoint, "auth")) => {
                 let container = ContainerName::new(tail).map_err(|e| {
                     miette!("`{subkey}` does not name a valid Azure container: {e}")
                 })?;
-                Ok((host, Some(Self::Auth(container))))
+                Ok((endpoint, Some(Self::Auth(container))))
             }
             _ => Ok((subkey, None)),
         }
@@ -1259,19 +1254,19 @@ pub struct Config {
     #[serde(skip_serializing_if = "S3OptionsMap::is_empty")]
     pub s3_options: S3OptionsMap,
 
-    /// Per-host endpoint options for `az://` Azure Blob channels, each carrying
-    /// its own per-container grants.
+    /// Per-endpoint options for `az://` Azure Blob channels, each carrying its own
+    /// per-container grants.
     ///
     /// A container named in an entry's `auth` table is the *only* way a container
     /// gets a credential: one with no grant is fetched anonymously, so this table
     /// is what makes a private container readable. The grant is per container
-    /// rather than per host because Azure assigns RBAC per container, so one
+    /// rather than per endpoint because Azure assigns RBAC per container, so one
     /// storage account routinely holds private and anonymous-read containers side
     /// by side. **User- and system-level config only** — see
     /// [`Config::load_with`], which drops the table when it appears in a
     /// project's `.pixi/config.toml`.
     #[serde(default)]
-    #[serde(skip_serializing_if = "AzureOptionsMap::is_empty")]
+    #[serde(skip_serializing_if = "rattler_config::config::Config::is_default")]
     pub azure_options: AzureOptionsMap,
 
     /// The option to specify the directory where detached environments are
@@ -1879,20 +1874,20 @@ impl Config {
 
     /// Drop the config entries a project checkout is not allowed to declare.
     ///
-    /// `azure-options` carries grants: naming a container under a host is what
+    /// `azure-options` carries grants: naming a container under an endpoint is what
     /// permits the user's ambient Azure credentials — an `az login` session, an
     /// environment key, a managed identity — to be sent there. A cloned repository
-    /// must not be able to name a host and collect them, so the table is honoured
-    /// only from user- and system-level config and dropped here with a warning
-    /// rather than silently, since a project that wrote one is expecting it to
-    /// work.
+    /// must not be able to name an endpoint and collect them, so the table is
+    /// honoured only from user- and system-level config and dropped here with a
+    /// warning rather than silently, since a project that wrote one is expecting it
+    /// to work.
     #[must_use]
     fn without_project_scoped_grants(mut self) -> Self {
-        for host in self.azure_options.hosts() {
+        for (endpoint, _) in self.azure_options.iter() {
             tracing::warn!(
-                "ignoring `[azure-options.\"{host}\"]` in the project's {}/{}: an Azure grant lets \
-                 this host receive your Azure credentials, so it may only be declared in your own \
-                 user- or system-level pixi config",
+                "ignoring `[azure-options.\"{endpoint}\"]` in the project's {}/{}: an Azure grant \
+                 lets this endpoint receive your Azure credentials, so it may only be declared in \
+                 your own user- or system-level pixi config",
                 consts::PIXI_DIR,
                 consts::CONFIG_FILE,
             );
@@ -1954,10 +1949,9 @@ impl Config {
             "s3-options.<bucket>.force-path-style",
             "s3-options.<bucket>.region",
             "azure-options",
-            "azure-options.<host>",
-            "azure-options.<host>.auth.<container>",
-            "azure-options.<host>.path-style",
-            "azure-options.<host>.scheme",
+            "azure-options.<endpoint>",
+            "azure-options.<endpoint>.auth.<container>",
+            "azure-options.<endpoint>.scheme",
             "shell",
             "shell.change-ps1",
             "shell.force-activate",
@@ -2011,7 +2005,7 @@ impl Config {
                     .chain(other.s3_options.0)
                     .collect(),
             ),
-            // A host is granted or not as a whole, so a higher-precedence file
+            // An endpoint is granted or not as a whole, so a higher-precedence file
             // replaces an entry outright rather than merging it field-wise.
             azure_options: rattler_config::config::Config::merge_config(
                 self.azure_options,
@@ -2409,18 +2403,18 @@ impl Config {
                     return Err(err);
                 };
 
-                let (host, field) = AzureConfigField::split(subkey)?;
-                let host = AzureHost::parse(host.trim_matches('"'))
-                    .map_err(|e| miette!("`{key}` does not name a valid Azure host: {e}"))?;
+                let (endpoint, field) = AzureConfigField::split(subkey)?;
+                let endpoint = AzureEndpointKey::parse(endpoint.trim_matches('"'))
+                    .map_err(|e| miette!("`{key}` does not name a valid Azure endpoint: {e}"))?;
 
                 let Some(field) = field else {
                     match value {
                         Some(value) => {
                             let options = serde_json::de::from_str(&value).into_diagnostic()?;
-                            self.azure_options.insert(host, options);
+                            self.azure_options.insert(endpoint, options);
                         }
                         None => {
-                            self.azure_options.remove(&host);
+                            self.azure_options.remove(&endpoint);
                         }
                     }
                     return Ok(());
@@ -2428,11 +2422,11 @@ impl Config {
 
                 // Read-modify-write rather than a mutable borrow: rebuilding the
                 // entry through `AzureEndpointOptions::new` keeps the type the only
-                // thing that can assemble one. An absent host reads as the defaults,
-                // so setting one field on a host with no entry writes an entry
-                // rather than silently doing nothing.
-                let current = self.azure_options.get(&host);
-                let mut endpoint = current.endpoint();
+                // thing that can assemble one. An absent endpoint reads as the
+                // defaults, so setting one field on an endpoint with no entry writes
+                // an entry rather than silently doing nothing.
+                let current = self.azure_options.get(&endpoint);
+                let mut scheme = current.scheme();
                 let mut auth: IndexMap<ContainerName, Auth> = current
                     .grants()
                     .map(|(container, auth)| (container.clone(), auth))
@@ -2449,17 +2443,10 @@ impl Config {
                     (AzureConfigField::Auth(container), Some(value)) => {
                         auth.insert(container, value.parse::<bool>().into_diagnostic()?.into());
                     }
-                    // Unsetting an endpoint field restores its default, each of
-                    // which is the conservative choice.
-                    (AzureConfigField::Scheme, None) => endpoint.scheme = AzureScheme::default(),
-                    (AzureConfigField::PathStyle, None) => {
-                        endpoint.addressing = Addressing::default();
-                    }
-                    (AzureConfigField::PathStyle, Some(value)) => {
-                        endpoint.addressing = value.parse::<bool>().into_diagnostic()?.into();
-                    }
+                    // Unsetting the scheme restores https, the conservative choice.
+                    (AzureConfigField::Scheme, None) => scheme = AzureScheme::default(),
                     (AzureConfigField::Scheme, Some(value)) => {
-                        endpoint.scheme = match value.as_str() {
+                        scheme = match value.as_str() {
                             "https" => AzureScheme::Https,
                             "http" => AzureScheme::Http,
                             other => {
@@ -2471,7 +2458,7 @@ impl Config {
                     }
                 }
                 self.azure_options
-                    .insert(host, AzureEndpointOptions::new(auth, endpoint));
+                    .insert(endpoint, AzureEndpointOptions::new(auth, scheme));
             }
             key if key.starts_with(EXPERIMENTAL) => {
                 if key == EXPERIMENTAL {
@@ -3180,10 +3167,10 @@ UNUSED = "unused"
             azure_options: {
                 let mut azure_options = AzureOptionsMap::default();
                 azure_options.insert(
-                    AzureHost::parse("mycompany.blob.core.windows.net").unwrap(),
+                    AzureEndpointKey::parse("mycompany.blob.core.windows.net").unwrap(),
                     AzureEndpointOptions::new(
                         [(ContainerName::new("releases").unwrap(), Auth::DefaultChain)],
-                        AzureEndpoint::default(),
+                        AzureScheme::default(),
                     ),
                 );
                 azure_options
@@ -3693,18 +3680,18 @@ UNUSED = "unused"
         config.set("unknown-key", None).unwrap_err();
     }
 
-    /// An Azure host is full of dots, so `azure-options.<host>.<field>` cannot be
-    /// split the way `s3-options.<bucket>.<field>` is: the field has to be
-    /// recognised by name or the host swallows it (or worse, loses its last label).
-    /// A grant carries one more segment still — the container it applies to.
+    /// An Azure endpoint is full of dots, so `azure-options.<endpoint>.<field>`
+    /// cannot be split the way `s3-options.<bucket>.<field>` is: the field has to
+    /// be recognised by name or the endpoint swallows it (or worse, loses its last
+    /// label). A grant carries one more segment still — the container it applies to.
     #[test]
     fn test_set_azure_options() {
-        let host = AzureHost::parse("mycompany.blob.core.windows.net").unwrap();
+        let host = AzureEndpointKey::parse("mycompany.blob.core.windows.net").unwrap();
         let releases = ContainerName::new("releases").unwrap();
         let staging = ContainerName::new("staging").unwrap();
         let mut config = Config::default();
 
-        // The tail is a container under `auth`, so the host is everything before
+        // The tail is a container under `auth`, so the endpoint is everything before
         // both segments.
         config
             .set(
@@ -3720,7 +3707,10 @@ UNUSED = "unused"
                 .auth
                 .is_granted()
         );
-        assert_eq!(config.azure_options.hosts().collect_vec(), vec![&host]);
+        assert_eq!(
+            config.azure_options.iter().map(|(k, _)| k).collect_vec(),
+            vec![&host]
+        );
 
         // A second container on the same host is a separate grant, and neither
         // touches a container nobody named.
@@ -3740,20 +3730,18 @@ UNUSED = "unused"
                 .is_granted()
         );
 
-        // `net` is not a field name, so this names a host and takes a whole entry.
-        let emulator = AzureHost::parse("127.0.0.1:10000").unwrap();
+        // `devstoreaccount1` is not a field name, so this names an endpoint and
+        // takes a whole entry. The `/account` shape is what says the storage
+        // account is a path segment rather than the first host label.
+        let emulator = AzureEndpointKey::parse("127.0.0.1:10000/devstoreaccount1").unwrap();
         config
             .set(
-                "azure-options.\"127.0.0.1:10000\"",
-                Some(
-                    r#"{"auth": {"general": true}, "scheme": "http", "path-style": true}"#
-                        .to_string(),
-                ),
+                "azure-options.\"127.0.0.1:10000/devstoreaccount1\"",
+                Some(r#"{"auth": {"general": true}, "scheme": "http"}"#.to_string()),
             )
             .unwrap();
         let entry = config.azure_options.get(&emulator);
-        assert_eq!(entry.endpoint().scheme, AzureScheme::Http);
-        assert_eq!(entry.endpoint().addressing, Addressing::PathStyle);
+        assert_eq!(entry.scheme(), AzureScheme::Http);
         assert!(
             entry
                 .fetch(Some(&ContainerName::new("general").unwrap()))
@@ -3774,11 +3762,12 @@ UNUSED = "unused"
 
         // Unsetting an entry revokes it outright.
         config
-            .set("azure-options.\"127.0.0.1:10000\"", None)
+            .set("azure-options.\"127.0.0.1:10000/devstoreaccount1\"", None)
             .unwrap();
-        assert!(!config.azure_options.hosts().contains(&emulator));
+        assert!(!config.azure_options.contains(&emulator));
 
-        // A host that is not a host is an error, not a silently-skipped grant.
+        // An endpoint that is not an endpoint is an error, not a silently-skipped
+        // grant.
         config
             .set(
                 "azure-options.not a host.auth.releases",
@@ -3786,8 +3775,8 @@ UNUSED = "unused"
             )
             .unwrap_err();
 
-        // There is no host-wide grant to set, so the bare `auth` path is refused
-        // rather than read as a host named `….auth`.
+        // There is no endpoint-wide grant to set, so the bare `auth` path is refused
+        // rather than read as an endpoint named `….auth`.
         let err = config
             .set(
                 "azure-options.mycompany.blob.core.windows.net.auth",
@@ -3812,7 +3801,7 @@ UNUSED = "unused"
     /// credentials.
     #[test]
     fn test_project_config_cannot_grant_an_azure_host() {
-        let host = AzureHost::parse("evil.blob.core.windows.net").unwrap();
+        let host = AzureEndpointKey::parse("evil.blob.core.windows.net").unwrap();
         let container = ContainerName::new("releases").unwrap();
         let mut project = Config::default();
         project
@@ -3839,7 +3828,9 @@ UNUSED = "unused"
                 .auth
                 .is_granted()
         );
-        assert!(loaded.azure_options.is_empty());
+        assert!(rattler_config::config::Config::is_default(
+            &loaded.azure_options
+        ));
     }
 
     #[rstest]

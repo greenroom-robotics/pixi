@@ -251,7 +251,10 @@ pub fn build_reqwest_middleware_stack(
     // 404 rather than receiving the user's ambient Azure credentials.
     result.push(Arc::new(AzureMiddleware::new(
         client.clone().into_client(),
-        config.azure_options.endpoint_options(),
+        config
+            .azure_options
+            .iter()
+            .map(|(key, options)| (key.clone(), options.clone())),
     )));
 
     result.push(Arc::new(

@@ -357,9 +357,16 @@ credentials from the Pixi authentication storage, see the [S3 section](../deploy
 
 ### `azure-options`
 
-Per-host configuration for `az://` Azure Blob Storage channels, keyed by the
-endpoint authority exactly as it appears in the channel URL — including a port,
-e.g. `"127.0.0.1:10000"`.
+Per-endpoint configuration for `az://` Azure Blob Storage channels. The key is the
+channel URL's prefix up to, but not including, the container, and its shape says
+where the storage account is:
+
+- `"mycompany.blob.core.windows.net"` — the account is the host's first label,
+  as on Azure itself.
+- `"127.0.0.1:10000/devstoreaccount1"` — the account is the first path segment,
+  which is the only spelling that works for an IP literal, a single-label host, or
+  the Azurite emulator, and the only one that tells two accounts behind one proxy
+  apart.
 
 Credentials are granted per **container**, in the entry's `auth` table: naming a
 container is the only thing that permits your ambient Azure credentials — an
@@ -384,11 +391,10 @@ identity that holds no role on it, so there is deliberately **no** host-wide
 lands in that workspace's `.pixi/config.toml`, where it is then ignored — see the
 warning below.
 
-| Key                | Default   | Meaning                                                                                                           |
-| ------------------ | --------- | ----------------------------------------------------------------------------------------------------------------- |
-| `auth.<container>` | `false`   | Whether credentials may be sent for that container on this host.                                                  |
-| `scheme`           | `"https"` | The scheme `az://` is rewritten to. `"http"` is for local emulators, and is rejected for a granted routable host.  |
-| `path-style`       | `false`   | Take the storage account from the first path segment instead of the first host label. Needed for Azurite.          |
+| Key                | Default   | Meaning                                                                                                                                              |
+| ------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth.<container>` | `false`   | Whether credentials may be sent for that container on this endpoint.                                                                                 |
+| `scheme`           | `"https"` | The scheme `az://` is rewritten to. `"http"` is for local emulators; only `AZURE_STORAGE_*` credentials are ever sent over it, never the `az login` session. |
 
 ```toml title="config.toml"
 --8<-- "docs/source_files/pixi_config_tomls/main_config.toml:azure-options"

@@ -259,7 +259,7 @@ pub async fn create_exec_prefix(
 
     // Determine virtual packages of the current platform
     let virtual_packages: Vec<GenericVirtualPackage> =
-        VirtualPackages::detect(&VirtualPackageOverrides::from_env())
+        VirtualPackages::detect(&VirtualPackageOverrides::from_env(), None)
             .into_diagnostic()
             .context("failed to determine virtual packages")?
             .into_generic_virtual_packages()
