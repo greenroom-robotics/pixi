@@ -323,20 +323,6 @@ rattler_upload = { git = "https://github.com/greenroom-robotics/rattler", rev = 
 rattler_virtual_packages = { git = "https://github.com/greenroom-robotics/rattler", rev = "2c43590911f644fd3c8f1723bcf1bc0eb1ce8a90" }
 simple_spawn_blocking = { git = "https://github.com/greenroom-robotics/rattler", rev = "2c43590911f644fd3c8f1723bcf1bc0eb1ce8a90" }
 
-# The published `rattler_build_*` crates are built against the crates.io rattler
-# release, so they cannot compile against the fork rev pinned above. Redirect
-# them to the greenroom-robotics rattler-build fork, which pins the same rattler
-# rev and adds `az://` channel support.
-rattler_build_core = { path = "../rattler-build/crates/rattler_build_core" }
-rattler_build_jinja = { path = "../rattler-build/crates/rattler_build_jinja" }
-rattler_build_networking = { path = "../rattler-build/crates/rattler_build_networking" }
-rattler_build_recipe = { path = "../rattler-build/crates/rattler_build_recipe" }
-rattler_build_script = { path = "../rattler-build/crates/rattler_build_script" }
-rattler_build_source_cache = { path = "../rattler-build/crates/rattler_build_source_cache" }
-rattler_build_types = { path = "../rattler-build/crates/rattler_build_types" }
-rattler_build_variant_config = { path = "../rattler-build/crates/rattler_build_variant_config" }
-rattler_build_yaml_parser = { path = "../rattler-build/crates/rattler_build_yaml_parser" }
-
 # Strip debug info from dependencies: faster links, much smaller `target/`,
 # while keeping full debuggability for our own crates.
 # See https://matklad.github.io/2021/09/04/fast-rust-builds.html
