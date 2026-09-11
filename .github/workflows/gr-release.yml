@@ -20,6 +20,9 @@ concurrency:
 
 jobs:
   release:
+    # A fork's dispatch would build both arches before failing on a `gh release
+    # create` its token can't authorise.
+    if: github.repository == 'greenroom-robotics/pixi'
     runs-on: 16vcpu-ubuntu-2404
     steps:
       # Full history: the script refuses a tag that already exists at another
