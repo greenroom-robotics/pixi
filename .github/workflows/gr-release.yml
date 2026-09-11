@@ -1,0 +1,55 @@
+name: GR Release
+
+# Cuts a `pixi-gr@<version>` fork release. The version comes from
+# crates/pixi/Cargo.toml, so this only has anything new to publish after an
+# upstream merge bumps it — hence dispatch-only rather than on push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish as a full release instead of a prerelease.
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gr-release
+
+jobs:
+  release:
+    runs-on: 16vcpu-ubuntu-2404
+    steps:
+      # Full history: the script refuses a tag that already exists at another
+      # commit, which it can only check with the tags present.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c # v2
+        with:
+          tool: cargo-zigbuild@0.23.4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # cargo-zigbuild falls back to `python3 -m ziglang` when no zig binary is
+      # on PATH
+      - run: pip install ziglang==0.16.0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Cut release
+        run: python3 scripts/release_gr.py ${{ inputs.publish && '--publish' || '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
