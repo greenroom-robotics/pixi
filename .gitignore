@@ -128,3 +128,7 @@ files.txt
 
 # Rattler build output
 output/*
+
+# insta scratch files, written by every test run
+*.pending-snap
+*.snap.new
