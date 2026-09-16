@@ -23,7 +23,7 @@ use rattler::install::{
 use rattler_conda_types::{ChannelUrl, PackageName, PrefixRecord, RepoDataRecord, prefix::Prefix};
 use thiserror::Error;
 
-use crate::{BuildEnvironment, SourceBuildError};
+use crate::BuildEnvironment;
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -117,17 +117,9 @@ pub enum InstallPixiEnvironmentError {
     #[error(transparent)]
     Installer(InstallerError),
 
-    #[error("failed to build '{}' from '{}'",
-        .0.as_source(),
-        .1)]
-    BuildUnresolvedSourceError(
-        PackageName,
-        Box<pixi_record::PinnedSourceSpec>,
-        #[diagnostic_source]
-        #[source]
-        SourceBuildError,
-        #[help] Option<String>,
-    ),
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    SourceBuilds(#[from] crate::SourceBuildFailures),
 
     #[error("failed to clear source-build cache for '{}'", .0.as_source())]
     ClearSourceBuildCache(PackageName, #[source] std::io::Error),

@@ -198,3 +198,28 @@ async fn try_compute_join_ok_and_err() {
     );
     assert_eq!(engine.compute(&Joiner(true)).await.unwrap(), Err("middle"));
 }
+
+/// A `Result`-returning mapper passed to `compute_join` drains instead of
+/// short-circuiting: every branch runs and all results come back.
+#[tokio::test(flavor = "current_thread")]
+async fn compute_join_drains_past_errors() {
+    #[derive(Clone, Debug, Display, Hash, PartialEq, Eq)]
+    #[display("draining")]
+    struct Joiner;
+    impl Key for Joiner {
+        type Value = Vec<Result<u32, &'static str>>;
+        async fn compute(&self, ctx: &mut ComputeCtx) -> Self::Value {
+            ctx.compute_join(vec![1u32, 2, 3], async |ctx, n| {
+                let v = ctx.compute(&NumKey(n)).await;
+                if n == 2 { Err("middle") } else { Ok(v) }
+            })
+            .await
+        }
+    }
+
+    let engine = ComputeEngine::new();
+    assert_eq!(
+        engine.compute(&Joiner).await.unwrap(),
+        vec![Ok(2), Err("middle"), Ok(4)]
+    );
+}
