@@ -193,6 +193,13 @@ pub struct GeneratedRecipe {
     /// Optional structured form of [`Self::build_input_globs`].  See
     /// [`Self::metadata_input_glob_sets`] for semantics.
     pub build_input_glob_sets: Vec<InputGlobSet>,
+    /// Version specs that override a run dependency's version at
+    /// `conda_build_v1` time, keyed by package name. Backends populate this
+    /// when a run dependency's version can only be resolved after the recipe
+    /// itself has been built (e.g. a path source dependency with no explicit
+    /// version).
+    pub run_dependency_version_overrides:
+        indexmap::IndexMap<rattler_conda_types::PackageName, rattler_conda_types::VersionSpec>,
 }
 
 /// Helper to create a concrete `Value<Url>` from an optional string
@@ -336,6 +343,7 @@ impl GeneratedRecipe {
             metadata_input_glob_sets: Vec::new(),
             build_input_globs: Vec::new(),
             build_input_glob_sets: Vec::new(),
+            run_dependency_version_overrides: indexmap::IndexMap::new(),
         })
     }
 }

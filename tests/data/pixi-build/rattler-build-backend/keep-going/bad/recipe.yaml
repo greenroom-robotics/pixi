@@ -1,0 +1,13 @@
+package:
+  name: bad
+  version: 0.1.0
+
+build:
+  script:
+    - if: win
+      then:
+        - echo boom-marker-line
+        - exit /b 1
+      else:
+        - echo boom-marker-line
+        - exit 1

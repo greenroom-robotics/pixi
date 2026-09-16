@@ -5,17 +5,20 @@
 //! `package.xml` is present alongside the manifest).
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use indexmap::IndexMap;
 use miette::Diagnostic;
 use pixi_build_backend::generated_recipe::{DefaultMetadataProvider, GeneratedRecipe};
-use pixi_build_types::{ProjectModel, Target};
+use pixi_build_types::{PackageSpec, ProjectModel, SourcePackageLocationSpec, Target};
 use rattler_build_jinja::JinjaTemplate;
 use rattler_build_recipe::stage0::{
     Conditional, Item, JinjaExpression, NestedItemList, Script, SerializableMatchSpec, Value,
 };
-use rattler_conda_types::{ChannelUrl, NoArchType, Platform};
+use rattler_conda_types::{
+    ChannelUrl, NoArchType, PackageName, Platform, Version, VersionBumpType, VersionSpec,
+};
 use thiserror::Error;
 
 use crate::build_script::render_build_script;
@@ -48,6 +51,25 @@ pub enum PixiNativeError {
         "ROS distro names must contain only letters, digits, `-`, `_`, or `.` characters."
     ))]
     InvalidDistroName { distro: String },
+
+    #[error("could not read sibling manifest at '{path}' for path dependency '{name}'")]
+    #[diagnostic(help(
+        "A path source dependency with no explicit `version` requires a readable \
+         `pixi.toml` at that path to derive one."
+    ))]
+    SiblingManifestUnreadable {
+        path: PathBuf,
+        name: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("sibling manifest '{path}' has no valid `[package].version` for dependency '{name}'")]
+    #[diagnostic(help(
+        "Set `[package].version` in the sibling manifest to a valid conda version, \
+         or pin an explicit `version` on the `{name}` dependency instead."
+    ))]
+    SiblingManifestInvalidVersion { path: PathBuf, name: String },
 }
 
 /// Validate a ROS distro string before it's interpolated into conda package
@@ -132,6 +154,94 @@ fn collect_distros_from_target(target: &Target, found: &mut BTreeSet<String>) {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct SiblingManifest {
+    package: SiblingPackage,
+}
+
+#[derive(serde::Deserialize)]
+struct SiblingPackage {
+    version: String,
+}
+
+/// Walk every run-dependency table on every target in the model. For each
+/// path source dependency with no explicit `version`, derive a
+/// `>=X.Y.Z,<M` override from the sibling package's own `[package].version`,
+/// where `M` is that version's major component plus one.
+///
+/// Git/url source deps and deps with an explicit `version` are left alone. A
+/// missing or unparsable sibling manifest / version is a hard error.
+fn resolve_run_dependency_version_overrides(
+    model: &ProjectModel,
+    manifest_root: &Path,
+) -> Result<IndexMap<PackageName, VersionSpec>, PixiNativeError> {
+    let mut overrides = IndexMap::new();
+
+    if let Some(targets) = &model.targets {
+        if let Some(default_target) = &targets.default_target {
+            collect_path_dep_overrides(default_target, manifest_root, &mut overrides)?;
+        }
+        if let Some(conditional_targets) = &targets.conditional {
+            for target in conditional_targets.values() {
+                collect_path_dep_overrides(target, manifest_root, &mut overrides)?;
+            }
+        }
+    }
+
+    Ok(overrides)
+}
+
+fn collect_path_dep_overrides(
+    target: &Target,
+    manifest_root: &Path,
+    overrides: &mut IndexMap<PackageName, VersionSpec>,
+) -> Result<(), PixiNativeError> {
+    let Some(run_dependencies) = &target.run_dependencies else {
+        return Ok(());
+    };
+
+    for (name, spec) in run_dependencies {
+        let PackageSpec::Source(source_spec) = spec else {
+            continue;
+        };
+        if source_spec.version.is_some() {
+            continue;
+        }
+        let SourcePackageLocationSpec::Path(path_spec) = &source_spec.location else {
+            continue;
+        };
+
+        let sibling_manifest_path = manifest_root.join(&path_spec.path).join("pixi.toml");
+        let invalid_version = || PixiNativeError::SiblingManifestInvalidVersion {
+            path: sibling_manifest_path.clone(),
+            name: name.to_string(),
+        };
+
+        let contents = fs_err::read_to_string(&sibling_manifest_path).map_err(|source| {
+            PixiNativeError::SiblingManifestUnreadable {
+                path: sibling_manifest_path.clone(),
+                name: name.to_string(),
+                source,
+            }
+        })?;
+        let manifest: SiblingManifest = toml::from_str(&contents).map_err(|_| invalid_version())?;
+        let version =
+            Version::from_str(&manifest.package.version).map_err(|_| invalid_version())?;
+        let upper_bound = version
+            .bump(VersionBumpType::Major)
+            .ok()
+            .and_then(|bumped| bumped.with_segments(0..1))
+            .ok_or_else(invalid_version)?;
+        let version_spec = format!(">={version},<{upper_bound}")
+            .parse::<VersionSpec>()
+            .map_err(|_| invalid_version())?;
+
+        overrides.insert(PackageName::from(name.clone()), version_spec);
+    }
+
+    Ok(())
+}
+
 /// Generate a recipe directly from the project model in pixi-native mode.
 ///
 /// Starts from the framework's default model-derived recipe, then injects
@@ -181,6 +291,9 @@ pub async fn generate(
     }
     let mut generated = GeneratedRecipe::from_model(model_for_recipe, &mut DefaultMetadataProvider)
         .map_err(|e| miette::miette!("failed to derive recipe from model: {e:?}"))?;
+
+    generated.run_dependency_version_overrides =
+        resolve_run_dependency_version_overrides(model, &manifest_root)?;
 
     let mut build_items: Vec<Item<SerializableMatchSpec>> = Vec::new();
     let mut host_items: Vec<Item<SerializableMatchSpec>> = Vec::new();
@@ -1000,5 +1113,143 @@ mod tests {
             ".source[0].path" => "[path]",
             ".build.script" => "[script]",
         });
+    }
+
+    fn path_source_spec(path: &str, version: Option<&str>) -> PackageSpec {
+        PackageSpec::Source(pixi_build_types::SourcePackageSpec {
+            location: SourcePackageLocationSpec::Path(pixi_build_types::PathSpec {
+                path: path.to_string(),
+            }),
+            version: version.map(|v| v.parse().expect("valid version spec")),
+            build: None,
+            build_number: None,
+            extras: None,
+            flags: None,
+            subdir: None,
+            license: None,
+            condition: None,
+        })
+    }
+
+    fn model_with_run_dep(name: &str, spec: PackageSpec) -> ProjectModel {
+        let mut run_dependencies = ordermap::OrderMap::new();
+        run_dependencies.insert(PackageName::new_unchecked(name).into(), spec);
+        ProjectModel {
+            name: Some("test-pkg".to_string()),
+            version: Some("0.1.0".parse().unwrap()),
+            targets: Some(pixi_build_types::Targets {
+                default_target: Some(Target {
+                    run_dependencies: Some(run_dependencies),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn path_dependency_without_version_gets_sibling_version_override() {
+        let root = tempfile::tempdir().unwrap();
+        let sibling_dir = root.path().join("topic_utils");
+        let consumer_dir = root.path().join("consumer");
+        fs_err::create_dir_all(&sibling_dir).unwrap();
+        fs_err::create_dir_all(&consumer_dir).unwrap();
+        fs_err::write(
+            sibling_dir.join("pixi.toml"),
+            "[package]\nname = \"topic_utils\"\nversion = \"1.2.3\"\n",
+        )
+        .unwrap();
+
+        let model = model_with_run_dep("topic_utils", path_source_spec("../topic_utils", None));
+
+        let overrides = resolve_run_dependency_version_overrides(&model, &consumer_dir).unwrap();
+
+        let name = PackageName::new_unchecked("topic_utils");
+        assert_eq!(
+            overrides.get(&name).map(ToString::to_string),
+            Some(">=1.2.3,<2".to_string())
+        );
+    }
+
+    #[test]
+    fn path_dependency_with_bare_major_sibling_version_gets_override() {
+        let root = tempfile::tempdir().unwrap();
+        let sibling_dir = root.path().join("topic_utils");
+        let consumer_dir = root.path().join("consumer");
+        fs_err::create_dir_all(&sibling_dir).unwrap();
+        fs_err::create_dir_all(&consumer_dir).unwrap();
+        fs_err::write(
+            sibling_dir.join("pixi.toml"),
+            "[package]\nname = \"topic_utils\"\nversion = \"1\"\n",
+        )
+        .unwrap();
+
+        let model = model_with_run_dep("topic_utils", path_source_spec("../topic_utils", None));
+
+        let overrides = resolve_run_dependency_version_overrides(&model, &consumer_dir).unwrap();
+
+        let name = PackageName::new_unchecked("topic_utils");
+        assert_eq!(
+            overrides.get(&name).map(ToString::to_string),
+            Some(">=1,<2".to_string())
+        );
+    }
+
+    #[test]
+    fn path_dependency_with_major_minor_sibling_version_gets_override() {
+        let root = tempfile::tempdir().unwrap();
+        let sibling_dir = root.path().join("topic_utils");
+        let consumer_dir = root.path().join("consumer");
+        fs_err::create_dir_all(&sibling_dir).unwrap();
+        fs_err::create_dir_all(&consumer_dir).unwrap();
+        fs_err::write(
+            sibling_dir.join("pixi.toml"),
+            "[package]\nname = \"topic_utils\"\nversion = \"1.2\"\n",
+        )
+        .unwrap();
+
+        let model = model_with_run_dep("topic_utils", path_source_spec("../topic_utils", None));
+
+        let overrides = resolve_run_dependency_version_overrides(&model, &consumer_dir).unwrap();
+
+        let name = PackageName::new_unchecked("topic_utils");
+        assert_eq!(
+            overrides.get(&name).map(ToString::to_string),
+            Some(">=1.2,<2".to_string())
+        );
+    }
+
+    #[test]
+    fn path_dependency_with_explicit_version_is_not_overridden() {
+        let root = tempfile::tempdir().unwrap();
+        let consumer_dir = root.path().join("consumer");
+        fs_err::create_dir_all(&consumer_dir).unwrap();
+        // No sibling manifest is created: an explicit version must skip the
+        // sibling-manifest lookup entirely.
+
+        let model = model_with_run_dep(
+            "topic_utils",
+            path_source_spec("../topic_utils", Some(">=2.0.0")),
+        );
+
+        let overrides = resolve_run_dependency_version_overrides(&model, &consumer_dir).unwrap();
+
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn path_dependency_with_missing_sibling_manifest_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let consumer_dir = root.path().join("consumer");
+        fs_err::create_dir_all(&consumer_dir).unwrap();
+
+        let model = model_with_run_dep("topic_utils", path_source_spec("../topic_utils", None));
+
+        let err = resolve_run_dependency_version_overrides(&model, &consumer_dir).unwrap_err();
+        assert!(matches!(
+            err,
+            PixiNativeError::SiblingManifestUnreadable { .. }
+        ));
     }
 }

@@ -1,0 +1,17 @@
+package:
+  name: dependent
+  version: 0.1.0
+
+requirements:
+  host:
+    - bad
+
+build:
+  script:
+    - if: win
+      then:
+        - if not exist "%PREFIX%" mkdir "%PREFIX%"
+        - echo hello from dependent! > "%PREFIX%\hi"
+      else:
+        - mkdir -p $PREFIX
+        - echo "hello from dependent!" > $PREFIX/hi

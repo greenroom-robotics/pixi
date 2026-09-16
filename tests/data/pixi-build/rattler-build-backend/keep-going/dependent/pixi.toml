@@ -1,0 +1,9 @@
+[package]
+name = "dependent"
+version = "0.1.0"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "0.3.*" }
+
+[package.host-dependencies]
+bad = { path = "../bad" }

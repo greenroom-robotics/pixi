@@ -8,6 +8,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 /// How often to warn while blocked on a peer's install lock.
 const INSTALL_LOCK_PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 
+use itertools::{Either, Itertools};
 use pixi_compute_engine::{ComputeCtx, DataStore};
 use pixi_record::UnresolvedPixiRecord;
 use rattler::install::{Installer, InstallerError, PythonInfo, Transaction};
@@ -21,6 +22,7 @@ use crate::compute_data::{
     HasAllowExecuteLinkScripts, HasAllowLinkOptions, HasIoConcurrencySemaphore, HasPackageCache,
     HasPixiInstallReporter,
 };
+use crate::errors::{SourceBuildFailure, SourceBuildFailures};
 use crate::install_pixi::{
     InstallPixiEnvironmentError, InstallPixiEnvironmentResult, InstallPixiEnvironmentSpec,
     reporter::WrappingInstallReporter,
@@ -82,7 +84,7 @@ impl InstallPixiEnvironmentExt for ComputeCtx {
 
 /// Shared source-build parameters that do not vary across the records
 /// being built together in one install call. Cloned cheaply into each
-/// [`try_compute_join`](ComputeCtx::try_compute_join) branch.
+/// [`compute_join`](ComputeCtx::compute_join) branch.
 #[derive(Clone)]
 struct SharedBuildParams {
     channels: Vec<rattler_conda_types::ChannelUrl>,
@@ -142,8 +144,8 @@ async fn install_inner(
     }
 
     // Build source packages concurrently via SourceBuildKey. Each branch
-    // gets a sub-ctx; `try_compute_join` short-circuits on the first
-    // error.
+    // gets a sub-ctx; every record is attempted so one broken package does
+    // not hide the state of the others.
     let shared = SharedBuildParams {
         channels: spec.channels.clone(),
         exclude_newer: spec.exclude_newer.clone(),
@@ -161,7 +163,7 @@ async fn install_inner(
                     source: Arc<pixi_record::UnresolvedSourceRecord>|
                     -> Result<
             Arc<crate::keys::source_build::SourceBuildResult>,
-            InstallPixiEnvironmentError,
+            SourceBuildFailure,
         > {
             let name = source.name().clone();
             let manifest_source = source.manifest_source.clone();
@@ -201,19 +203,26 @@ async fn install_inner(
                              machine."
                         )
                     });
-                    InstallPixiEnvironmentError::BuildUnresolvedSourceError(
-                        name,
-                        Box::new(manifest_source),
-                        err,
+                    SourceBuildFailure {
+                        package: name,
+                        manifest_source: Box::new(manifest_source),
+                        error: err,
                         help,
-                    )
+                    }
                 })
         }
     };
-    let built_sources = ctx
-        .try_compute_join(source_records, mapper)
+    let (built_sources, failures): (Vec<_>, Vec<_>) = ctx
+        .compute_join(source_records, mapper)
         .await
-        .map_err(CommandDispatcherError::Failed)?;
+        .into_iter()
+        .partition_map(|result| match result {
+            Ok(built) => Either::Left(built),
+            Err(failure) => Either::Right(failure),
+        });
+    if let Some(failures) = SourceBuildFailures::from_vec(failures) {
+        return Err(CommandDispatcherError::Failed(failures.into()));
+    }
 
     // Merge built source records into the binary set and keep a lookup
     // map so callers (e.g. build-prefix assemblers) can find the
