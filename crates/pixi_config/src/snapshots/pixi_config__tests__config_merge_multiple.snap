@@ -152,6 +152,7 @@ Config {
             },
         ),
     },
+    keep_going: None,
     tool_platform: None,
     cache: CacheConfig {
         root: None,

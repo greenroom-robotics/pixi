@@ -853,6 +853,7 @@ impl Workspace {
                 max_concurrent_builds: self.config().max_concurrent_builds().into(),
                 ..Limits::default()
             })
+            .keep_going_source_builds(self.config().keep_going())
             .with_backend_overrides(
                 self.backend_override
                     .clone()

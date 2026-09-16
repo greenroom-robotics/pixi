@@ -129,6 +129,10 @@ pub(crate) struct CommandDispatcherData {
     /// True if execution of link scripts is enabled.
     pub execute_link_scripts: bool,
 
+    /// True if a failing source build lets the remaining source builds run
+    /// to completion instead of aborting at the first failure.
+    pub keep_going_source_builds: bool,
+
     /// Whether symbolic links are allowed during package installation.
     pub allow_symbolic_links: Option<bool>,
 
