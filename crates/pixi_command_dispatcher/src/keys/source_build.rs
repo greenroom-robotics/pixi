@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, hash::Hash, path::PathBuf, sync::Arc};
 
 use derive_more::Display;
 use futures::{SinkExt, channel::mpsc::unbounded};
+use itertools::{Either, Itertools};
 use pixi_build_types::procedures::{
     conda_build_v1::CondaPackageFormat,
     conda_outputs::{CondaOutput, CondaOutputsParams},
@@ -18,7 +19,8 @@ use pixi_record::{PixiRecord, UnresolvedPixiRecord, UnresolvedSourceRecord, Vari
 use pixi_spec::{ResolvedExcludeNewer, SourceAnchor, SourceSpec};
 use pixi_variant::VariantSelector;
 use rattler_conda_types::{
-    ChannelUrl, PackageRecord, RepoDataRecord, package::DistArchiveIdentifier, prefix::Prefix,
+    ChannelUrl, PackageName, PackageRecord, RepoDataRecord, package::DistArchiveIdentifier,
+    prefix::Prefix,
 };
 use rattler_digest::Sha256Hash;
 use tracing::instrument;
@@ -551,32 +553,43 @@ async fn recurse_source_deps(
 ) -> Result<(Vec<Arc<SourceBuildResult>>, Vec<Arc<SourceBuildResult>>), SourceBuildError> {
     // build_packages run on the build platform. The nested build's
     // HOST platform is therefore the outer's BUILD platform.
-    let build = build_source_deps(
+    let (build, mut failed) = build_source_deps(
         ctx,
         spec.clone(),
         spec.record.build_packages.clone(),
         spec.build_environment.to_build_from_build(),
     )
-    .await?;
+    .await;
     // host_packages target the outer host platform. The nested build's
-    // build_environment matches the outer's.
-    let host = build_source_deps(
+    // build_environment matches the outer's. Attempted even when a build
+    // dep failed, so one broken dep does not hide the state of the rest.
+    let (host, host_failed) = build_source_deps(
         ctx,
         spec.clone(),
         spec.record.host_packages.clone(),
         spec.build_environment.clone(),
     )
-    .await?;
+    .await;
+    failed.extend(host_failed);
+
+    if !failed.is_empty() {
+        return Err(SourceBuildError::DependencyFailed {
+            package: spec.record.name().clone(),
+            dependencies: failed,
+        });
+    }
     Ok((build, host))
 }
 
-/// Build a single bucket (build or host) of source dependencies concurrently.
+/// Build a single bucket (build or host) of source dependencies
+/// concurrently. Returns the results that succeeded alongside the names of
+/// the dependencies that failed; every dependency is attempted.
 async fn build_source_deps(
     ctx: &mut ComputeCtx,
     spec: Arc<SourceBuildSpec>,
     packages: Vec<UnresolvedPixiRecord>,
     nested_build_environment: BuildEnvironment,
-) -> Result<Vec<Arc<SourceBuildResult>>, SourceBuildError> {
+) -> (Vec<Arc<SourceBuildResult>>, Vec<PackageName>) {
     let sources: Vec<Arc<UnresolvedSourceRecord>> = packages
         .into_iter()
         .filter_map(|r| match r {
@@ -585,14 +598,15 @@ async fn build_source_deps(
         })
         .collect();
     if sources.is_empty() {
-        return Ok(Vec::new());
+        return (Vec::new(), Vec::new());
     }
     let mapper = {
         let spec = spec.clone();
         let build_env = nested_build_environment;
         async move |sub_ctx: &mut ComputeCtx,
                     src: Arc<UnresolvedSourceRecord>|
-                    -> Result<Arc<SourceBuildResult>, SourceBuildError> {
+                    -> Result<Arc<SourceBuildResult>, PackageName> {
+            let name = src.name().clone();
             let nested_spec = SourceBuildSpec {
                 record: src,
                 channels: spec.channels.clone(),
@@ -616,11 +630,19 @@ async fn build_source_deps(
                 // inline definitions apply only to the consumer's direct deps.
                 inline: None,
             };
-            let result = sub_ctx.compute(&SourceBuildKey::new(nested_spec)).await?;
-            Ok(result)
+            sub_ctx
+                .compute(&SourceBuildKey::new(nested_spec))
+                .await
+                .map_err(|_| name)
         }
     };
-    ctx.try_compute_join(sources, mapper).await
+    ctx.compute_join(sources, mapper)
+        .await
+        .into_iter()
+        .partition_map(|result| match result {
+            Ok(built) => Either::Left(built),
+            Err(name) => Either::Right(name),
+        })
 }
 
 /// Call `conda_outputs` on the backend and pick the one matching this
