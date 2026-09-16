@@ -1,0 +1,13 @@
+[workspace]
+authors = ["tenzin <tenzin.platter@greenroomrobotics.com>"]
+channels = ["conda-forge"]
+exclude-newer = "7d"
+name = "keep-going-success"
+platforms = ["osx-arm64", "linux-64", "osx-64", "win-64"]
+preview = ["pixi-build"]
+version = "0.1.0"
+
+[dependencies]
+pkg-a = { path = "pkg-a" }
+pkg-b = { path = "pkg-b" }
+pkg-c = { path = "pkg-c" }
