@@ -2,7 +2,7 @@ use crate::{
     download_verify_reporter::BuildDownloadVerifyReporter,
     main_progress_bar::{MainProgressBar, Tracker},
 };
-use futures::{Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use indicatif::MultiProgress;
 use parking_lot::Mutex;
 use pixi_command_dispatcher::{BackendSourceBuildSpec, reporter::BackendSourceBuildReporter};
@@ -10,18 +10,43 @@ use pixi_compute_reporters::{OperationId, OperationRegistry};
 use pixi_progress::ProgressBarPlacement;
 use rattler::install::Transaction;
 use rattler_conda_types::{PrefixRecord, RepoDataRecord};
-use std::{cmp::Ordering, collections::HashMap, sync::Arc};
-use tokio::sync::mpsc::UnboundedReceiver;
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use uv_configuration::initialize_rayon_once;
+
+/// Number of trailing log lines shown on stderr when a build fails. The full
+/// log is always written to disk.
+const FAILED_BUILD_TAIL_LINES: usize = 30;
+
+/// Where a build's backend output goes while the build runs.
+enum BuildOutput {
+    /// Printed to stderr as it arrives by a task owning the stream.
+    Streamed,
+    /// Held until the build finishes, then discarded or reported.
+    Buffered(Box<dyn Stream<Item = String> + Unpin + Send>),
+}
+
+/// Per-build reporter state, keyed by `OperationId`.
+struct BuildProgress {
+    /// Bar slot in `preparing_progress_bar`.
+    bar: usize,
+    package: String,
+    output: Option<BuildOutput>,
+}
 
 #[derive(Clone)]
 pub struct SyncReporter {
     registry: Arc<OperationRegistry>,
     multi_progress: MultiProgress,
     combined_inner: Arc<Mutex<CombinedInstallReporterInner>>,
-    /// `OperationId` → bar slot in `preparing_progress_bar`. Lets
-    /// `on_started` / `on_finished` find the bar created at `on_queued`.
-    build_bars: Arc<Mutex<HashMap<OperationId, usize>>>,
+    builds: Arc<Mutex<HashMap<OperationId, BuildProgress>>>,
+    /// Directory that failed builds' full logs are written to. `None` when the
+    /// cache directory could not be resolved.
+    build_log_dir: Option<PathBuf>,
 }
 
 impl SyncReporter {
@@ -38,7 +63,10 @@ impl SyncReporter {
             registry,
             multi_progress,
             combined_inner,
-            build_bars: Arc::new(Mutex::new(HashMap::new())),
+            builds: Arc::new(Mutex::new(HashMap::new())),
+            build_log_dir: pixi_config::get_cache_dir()
+                .ok()
+                .map(|cache_dir| cache_dir.join(pixi_consts::consts::BUILD_LOGS_CACHE_DIR)),
         }
     }
 
@@ -46,7 +74,6 @@ impl SyncReporter {
         let mut inner = self.combined_inner.lock();
         inner.preparing_progress_bar.clear();
         inner.install_progress_bar.clear();
-        inner.build_output_receiver = None;
     }
 
     /// Creates a new InstallReporter that shares this SyncReporter instance
@@ -73,12 +100,20 @@ impl BackendSourceBuildReporter for SyncReporter {
         // Drive the "building <pkg>" progress entry directly from the
         // backend-build event.
         let id = self.registry.allocate();
+        let package = env.name.as_source().to_owned();
         let bar = self
             .combined_inner
             .lock()
             .preparing_progress_bar
-            .on_build_queued(env.name.as_source());
-        self.build_bars.lock().insert(id, bar);
+            .on_build_queued(&package);
+        self.builds.lock().insert(
+            id,
+            BuildProgress {
+                bar,
+                package,
+                output: None,
+            },
+        );
         id
     }
 
@@ -87,67 +122,84 @@ impl BackendSourceBuildReporter for SyncReporter {
         id: OperationId,
         mut backend_output_stream: Box<dyn Stream<Item = String> + Unpin + Send>,
     ) {
-        let bar = match self.build_bars.lock().get(&id).copied() {
-            Some(bar) => bar,
-            None => return,
+        let stream_to_screen = tracing::event_enabled!(tracing::Level::WARN);
+
+        let mut builds = self.builds.lock();
+        let Some(build) = builds.get_mut(&id) else {
+            return;
         };
+        self.combined_inner
+            .lock()
+            .preparing_progress_bar
+            .on_build_start(build.bar);
 
-        // Enable streaming of the logs from the backend
-        let print_backend_output = tracing::event_enabled!(tracing::Level::WARN);
-        // Stream the progress of the output to the screen.
-        let progress_bar = self.multi_progress.clone();
-
-        // Create a sender to buffer the output lines so we can output them later if
-        // needed.
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        {
-            let mut inner = self.combined_inner.lock();
-            inner.preparing_progress_bar.on_build_start(bar);
-            if !print_backend_output {
-                inner.build_output_receiver = Some(rx);
-            }
+        if !stream_to_screen {
+            build.output = Some(BuildOutput::Buffered(backend_output_stream));
+            return;
         }
 
+        build.output = Some(BuildOutput::Streamed);
+        let progress_bar = self.multi_progress.clone();
+        let package = build.package.clone();
         tokio::spawn(async move {
             while let Some(line) = backend_output_stream.next().await {
-                if print_backend_output {
-                    // Suspend the main progress bar while we print the line.
-                    progress_bar.suspend(|| eprintln!("{line}"));
-                } else {
-                    // Send the line to the receiver
-                    if tx.send(line).is_err() {
-                        // Receiver dropped, exit early
-                        break;
-                    }
-                }
+                progress_bar.suspend(|| eprintln!("[{package}] {line}"));
             }
         });
     }
 
     fn on_finished(&self, id: OperationId, failed: bool) {
-        let bar = match self.build_bars.lock().remove(&id) {
-            Some(bar) => bar,
-            None => return,
+        let Some(build) = self.builds.lock().remove(&id) else {
+            return;
         };
-        // Take the stream that receives the output from the backend so we can drop the
-        // memory.
-        let build_output_receiver = {
-            let mut inner = self.combined_inner.lock();
-            inner.preparing_progress_bar.on_build_finished(bar);
-            inner.build_output_receiver.take()
-        };
+        self.combined_inner
+            .lock()
+            .preparing_progress_bar
+            .on_build_finished(build.bar);
 
-        // If the build failed, we want to print the output from the backend.
-        let progress_bar = self.multi_progress.clone();
-        if failed && let Some(mut build_output_receiver) = build_output_receiver {
-            tokio::spawn(async move {
-                while let Some(line) = build_output_receiver.recv().await {
-                    // Suspend the main progress bar while we print the line.
-                    progress_bar.suspend(|| eprintln!("{line}"));
-                }
-            });
+        let Some(BuildOutput::Buffered(stream)) = build.output else {
+            return;
+        };
+        if !failed {
+            return;
         }
+
+        // The backend's log sink is dropped before this callback runs, so the
+        // stream yields everything it still holds without ever pending.
+        let lines = drain_ready(stream);
+        let log_path = self
+            .build_log_dir
+            .as_deref()
+            .and_then(|dir| write_build_log(dir, &build.package, &lines));
+
+        self.multi_progress.suspend(|| {
+            eprintln!("build of {} failed:", build.package);
+            let tail = lines.len().saturating_sub(FAILED_BUILD_TAIL_LINES);
+            for line in &lines[tail..] {
+                eprintln!("  {line}");
+            }
+            if let Some(log_path) = log_path {
+                eprintln!("full log: {}", log_path.display());
+            }
+        });
     }
+}
+
+fn drain_ready(mut stream: Box<dyn Stream<Item = String> + Unpin + Send>) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Some(Some(line)) = stream.next().now_or_never() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn write_build_log(dir: &Path, package: &str, lines: &[String]) -> Option<PathBuf> {
+    let path = dir.join(format!("{package}.log"));
+    fs_err::create_dir_all(dir).ok()?;
+    let mut contents = lines.join("\n");
+    contents.push('\n');
+    fs_err::write(&path, contents).ok()?;
+    Some(path)
 }
 
 pub struct CombinedInstallReporterInner {
@@ -158,8 +210,6 @@ pub struct CombinedInstallReporterInner {
 
     preparing_progress_bar: BuildDownloadVerifyReporter,
     install_progress_bar: MainProgressBar<PackageWithSize>,
-
-    build_output_receiver: Option<UnboundedReceiver<String>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -213,7 +263,6 @@ impl CombinedInstallReporterInner {
             install_progress_bar: link_progress_bar,
             operation_link_id: HashMap::new(),
             cache_entry_id: HashMap::new(),
-            build_output_receiver: None,
         }
     }
 
