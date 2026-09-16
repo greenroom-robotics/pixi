@@ -11,6 +11,7 @@ version = "0.1.0"
 
 [dependencies]
 # Standard library
+fs-err = { workspace = true }
 futures = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
@@ -31,6 +32,8 @@ tracing = { workspace = true }
 pixi_build_discovery = { workspace = true }
 pixi_command_dispatcher = { workspace = true }
 pixi_compute_reporters = { workspace = true }
+pixi_config = { workspace = true }
+pixi_consts = { workspace = true }
 pixi_git = { workspace = true }
 pixi_progress = { workspace = true }
 
