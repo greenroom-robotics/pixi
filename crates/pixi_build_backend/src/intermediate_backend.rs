@@ -11,7 +11,9 @@ use ordermap::OrderMap;
 use pixi_build_types::{
     BackendCapabilities, ExtraGroupName, PathSpec, ProjectModel, SourcePackageSpec, TargetSelector,
     procedures::{
-        conda_build_v1::{CondaBuildV1Output, CondaBuildV1Params, CondaBuildV1Result},
+        conda_build_v1::{
+            CondaBuildV1Dependency, CondaBuildV1Output, CondaBuildV1Params, CondaBuildV1Result,
+        },
         conda_outputs::{
             CondaOutput, CondaOutputDependencies, CondaOutputIgnoreRunExports, CondaOutputMetadata,
             CondaOutputRunExports, CondaOutputsParams, CondaOutputsResult,
@@ -33,6 +35,7 @@ use rattler_build_recipe::variant_render::RenderConfig;
 use rattler_build_types::NormalizedKey;
 use rattler_build_variant_config::VariantConfig;
 use rattler_conda_types::NoArchType;
+use rattler_conda_types::{PackageName, PackageNameMatcher, VersionSpec};
 use rattler_conda_types::{
     Platform, RepodataRevision, compression_level::CompressionLevel, package::CondaArchiveType,
 };
@@ -626,7 +629,7 @@ where
 
     async fn conda_build_v1(
         &self,
-        params: CondaBuildV1Params,
+        mut params: CondaBuildV1Params,
     ) -> miette::Result<CondaBuildV1Result> {
         let host_platform = params
             .host_prefix
@@ -678,6 +681,11 @@ where
                 self.checkout_root.clone(),
             )
             .await?;
+
+        params.run_dependencies = apply_run_dependency_version_overrides(
+            params.run_dependencies,
+            &recipe.run_dependency_version_overrides,
+        );
 
         // Convert the recipe to source code.
         // TODO(baszalmstra): In the future it would be great if we could just
@@ -936,6 +944,26 @@ where
     }
 }
 
+/// Rewrites the version of every dependency whose exact name is present in
+/// `overrides`, leaving glob/regex-matched and unlisted dependencies as-is.
+fn apply_run_dependency_version_overrides(
+    dependencies: Option<Vec<CondaBuildV1Dependency>>,
+    overrides: &IndexMap<PackageName, VersionSpec>,
+) -> Option<Vec<CondaBuildV1Dependency>> {
+    dependencies.map(|deps| {
+        deps.into_iter()
+            .map(|mut dep| {
+                if let PackageNameMatcher::Exact(name) = &dep.spec.name
+                    && let Some(version) = overrides.get(name)
+                {
+                    dep.spec.version = Some(version.clone());
+                }
+                dep
+            })
+            .collect()
+    })
+}
+
 pub fn find_matching_output(
     expected_output: &CondaBuildV1Output,
     mut discovered_outputs: IndexSet<DiscoveredOutput>,
@@ -1043,5 +1071,42 @@ fn default_capabilities() -> BackendCapabilities {
     BackendCapabilities {
         provides_conda_outputs: Some(true),
         provides_conda_build_v1: Some(true),
+    }
+}
+
+#[cfg(test)]
+mod run_dependency_version_override_tests {
+    use rattler_conda_types::MatchSpec;
+
+    use super::*;
+
+    fn dependency(spec: &str) -> CondaBuildV1Dependency {
+        CondaBuildV1Dependency {
+            spec: spec.parse::<MatchSpec>().expect("valid match spec"),
+            source: None,
+        }
+    }
+
+    #[test]
+    fn overrides_matched_name_leaves_others_unchanged() {
+        let mut overrides = IndexMap::new();
+        overrides.insert(
+            PackageName::new_unchecked("topic_utils"),
+            ">=1.2.3,<2"
+                .parse::<VersionSpec>()
+                .expect("valid version spec"),
+        );
+
+        let deps = apply_run_dependency_version_overrides(
+            Some(vec![dependency("topic_utils"), dependency("other_pkg")]),
+            &overrides,
+        )
+        .expect("dependencies present");
+
+        assert_eq!(
+            deps[0].spec.version.as_ref().map(ToString::to_string),
+            Some(">=1.2.3,<2".to_string())
+        );
+        assert_eq!(deps[1].spec.version, None);
     }
 }

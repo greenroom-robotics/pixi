@@ -6133,6 +6133,7 @@ dependencies = [
  "indexmap 2.14.0",
  "insta",
  "miette 7.6.0",
+ "ordermap",
  "pathdiff",
  "pixi_build_backend",
  "pixi_build_discovery",
@@ -6152,6 +6153,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "url",
 ]
