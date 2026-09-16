@@ -41,7 +41,7 @@ def test_keep_going_reports_failure_and_skips_dependents(
     )
 
     output = verify_cli_command(
-        [pixi, "install", "--quiet", "--manifest-path", manifest_path],
+        [pixi, "install", "--manifest-path", manifest_path],
         expected_exit_code=ExitCode.FAILURE,
         env=env,
         stderr_contains=[
@@ -68,6 +68,40 @@ def test_keep_going_reports_failure_and_skips_dependents(
     log_path = cache_dir / "build-logs" / "bad.log"
     assert log_path.is_file(), f"expected a build log at {log_path}"
     assert "boom-marker-line" in log_path.read_text()
+
+
+@pytest.mark.slow
+def test_keep_going_verbose_streams_backend_output(
+    pixi: Path, build_data: Path, tmp_pixi_workspace: Path
+) -> None:
+    test_data = build_data.joinpath("rattler-build-backend")
+    workspace_dir = tmp_pixi_workspace / "keep-going"
+    copytree_with_local_backend(test_data / "keep-going", workspace_dir)
+
+    cache_dir = tmp_pixi_workspace / "pixi-cache"
+    env = {"PIXI_CACHE_DIR": str(cache_dir)}
+
+    manifest_path = workspace_dir / "pixi.toml"
+    verify_cli_command(
+        [
+            pixi,
+            "config",
+            "set",
+            "--manifest-path",
+            manifest_path,
+            "--local",
+            "concurrency.builds",
+            "3",
+        ],
+        env=env,
+    )
+
+    verify_cli_command(
+        [pixi, "install", "-v", "--manifest-path", manifest_path],
+        expected_exit_code=ExitCode.FAILURE,
+        env=env,
+        stderr_contains=["[bad] "],
+    )
 
 
 @pytest.mark.slow

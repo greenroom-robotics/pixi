@@ -122,7 +122,10 @@ impl BackendSourceBuildReporter for SyncReporter {
         id: OperationId,
         mut backend_output_stream: Box<dyn Stream<Item = String> + Unpin + Send>,
     ) {
-        let stream_to_screen = tracing::event_enabled!(tracing::Level::WARN);
+        // `pixi_reporters` has no explicit EnvFilter directive of its own, so
+        // it inherits the `pixi` crate's level, which is WARN by default and
+        // INFO at `-v` and above: this is the level that separates them.
+        let stream_to_screen = tracing::event_enabled!(tracing::Level::INFO);
 
         let mut builds = self.builds.lock();
         let Some(build) = builds.get_mut(&id) else {
