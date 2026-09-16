@@ -1046,7 +1046,8 @@ impl ExperimentalConfig {
 // `ConcurrencyConfig` and its default helpers now live in `rattler_config`.
 // Re-exported so external code keeps compiling against `pixi_config::…`.
 pub use rattler_config::config::concurrency::{
-    ConcurrencyConfig, default_max_concurrent_downloads, default_max_concurrent_solves,
+    ConcurrencyConfig, default_max_concurrent_builds, default_max_concurrent_downloads,
+    default_max_concurrent_solves,
 };
 
 impl PyPIConfig {
@@ -1543,6 +1544,7 @@ impl From<ConfigCli> for Config {
                 downloads: cli
                     .concurrent_downloads
                     .unwrap_or(ConcurrencyConfig::default().downloads),
+                builds: ConcurrencyConfig::default().builds,
             },
             tool_platform: None,
             run_post_link_scripts: if cli.run_post_link_scripts {
@@ -2076,6 +2078,7 @@ impl Config {
             "cache.repodata",
             "cache.root",
             "concurrency",
+            "concurrency.builds",
             "concurrency.downloads",
             "concurrency.solves",
             "default-channels",
@@ -2308,6 +2311,11 @@ impl Config {
     /// Retrieve the value for the network_requests field.
     pub fn max_concurrent_downloads(&self) -> usize {
         self.concurrency.downloads
+    }
+
+    /// Retrieve the value for the max_concurrent_builds field.
+    pub fn max_concurrent_builds(&self) -> usize {
+        self.concurrency.builds
     }
 
     /// The platform to use to install tools.
@@ -2717,6 +2725,13 @@ impl Config {
                             return Err(miette!("'downloads' requires a number value"));
                         }
                     }
+                    "builds" => {
+                        if let Some(value) = value {
+                            self.concurrency.builds = value.parse().into_diagnostic()?;
+                        } else {
+                            return Err(miette!("'builds' requires a number value"));
+                        }
+                    }
                     _ => return Err(err),
                 }
             }
@@ -3008,6 +3023,7 @@ tls-root-certs = "native"
 detached-environments = "{}"
 pinning-strategy = "no-pin"
 concurrency.solves = 5
+concurrency.builds = 3
 UNUSED = "unused"
         "#,
             env!("CARGO_MANIFEST_DIR").replace('\\', "\\\\").as_str()
@@ -3026,6 +3042,7 @@ UNUSED = "unused"
             Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
         );
         assert_eq!(config.max_concurrent_solves(), 5);
+        assert_eq!(config.max_concurrent_builds(), 3);
         assert!(unused.contains("UNUSED"));
 
         let toml = r"detached-environments = true";
@@ -3134,6 +3151,7 @@ UNUSED = "unused"
         );
         assert_eq!(config.concurrency.solves, 8);
         assert_eq!(config.concurrency.downloads, 100);
+        assert_eq!(config.concurrency.builds, default_max_concurrent_builds());
         assert_eq!(
             config.run_post_link_scripts,
             Some(RunPostLinkScripts::Insecure)
@@ -3931,6 +3949,11 @@ UNUSED = "unused"
             .unwrap();
 
         assert_eq!(config.max_concurrent_downloads(), 1);
+
+        config
+            .set("concurrency.builds", Some("4".to_string()))
+            .unwrap();
+        assert_eq!(config.max_concurrent_builds(), 4);
 
         config.set("s3-options.my-bucket", Some(r#"{"endpoint-url": "http://localhost:9000", "force-path-style": true, "region": "auto"}"#.to_string())).unwrap();
         let s3_options = config.s3_options.0.get("my-bucket").unwrap();

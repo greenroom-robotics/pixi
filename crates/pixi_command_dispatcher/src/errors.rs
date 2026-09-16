@@ -92,6 +92,129 @@ pub enum SourceBuildError {
 
     #[error(transparent)]
     GlobSet(Arc<pixi_glob::GlobSetError>),
+
+    #[error("not built: {} failed to build", format_dependencies(dependencies))]
+    DependencyFailed {
+        package: PackageName,
+        dependencies: Vec<PackageName>,
+    },
+}
+
+/// One source package that could not be built, with the message and hint
+/// that apply to it.
+#[derive(Debug, Clone, Error, Diagnostic)]
+#[error("failed to build '{}' from '{}'", package.as_source(), manifest_source)]
+pub struct SourceBuildFailure {
+    pub package: PackageName,
+    pub manifest_source: Box<pixi_record::PinnedSourceSpec>,
+    #[diagnostic_source]
+    #[source]
+    pub error: SourceBuildError,
+    #[help]
+    pub help: Option<String>,
+}
+
+impl SourceBuildFailure {
+    /// The dependencies whose failure is the only reason this package was
+    /// not built.
+    fn failed_dependencies(&self) -> Option<&[PackageName]> {
+        match &self.error {
+            SourceBuildError::DependencyFailed { dependencies, .. } => Some(dependencies),
+            _ => None,
+        }
+    }
+}
+
+/// Every source package that failed while building a set of them together.
+/// Holding the first failure apart from the rest keeps the collection
+/// non-empty by construction.
+#[derive(Debug, Clone, Error)]
+pub struct SourceBuildFailures {
+    first: SourceBuildFailure,
+    rest: Vec<SourceBuildFailure>,
+}
+
+impl SourceBuildFailures {
+    pub fn new(first: SourceBuildFailure, rest: Vec<SourceBuildFailure>) -> Self {
+        Self { first, rest }
+    }
+
+    /// `None` when `failures` is empty and there is nothing to report.
+    pub fn from_vec(failures: Vec<SourceBuildFailure>) -> Option<Self> {
+        let mut failures = failures.into_iter();
+        let first = failures.next()?;
+        Some(Self::new(first, failures.collect()))
+    }
+
+    fn all(&self) -> impl Iterator<Item = &SourceBuildFailure> {
+        std::iter::once(&self.first).chain(&self.rest)
+    }
+
+    /// Packages that failed on their own account.
+    fn failed(&self) -> impl Iterator<Item = &SourceBuildFailure> {
+        self.all().filter(|f| f.failed_dependencies().is_none())
+    }
+
+    /// Packages left unbuilt because something they depend on failed.
+    fn skipped(&self) -> impl Iterator<Item = (&PackageName, &[PackageName])> {
+        self.all()
+            .filter_map(|f| Some((&f.package, f.failed_dependencies()?)))
+    }
+}
+
+impl std::fmt::Display for SourceBuildFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let failed = self.failed().count();
+        let skipped = self.skipped().count();
+        if failed == 0 {
+            return write!(
+                f,
+                "{skipped} source {} skipped because their dependencies failed to build",
+                plural_packages(skipped)
+            );
+        }
+        write!(
+            f,
+            "{failed} source {} failed to build",
+            plural_packages(failed)
+        )?;
+        if skipped > 0 {
+            write!(f, ", {skipped} skipped")?;
+        }
+        Ok(())
+    }
+}
+
+impl Diagnostic for SourceBuildFailures {
+    fn related(&self) -> Option<Box<dyn Iterator<Item = &dyn Diagnostic> + '_>> {
+        Some(Box::new(self.failed().map(|f| f as &dyn Diagnostic)))
+    }
+
+    fn help(&self) -> Option<Box<dyn std::fmt::Display + '_>> {
+        let lines = self
+            .skipped()
+            .map(|(package, dependencies)| {
+                format!(
+                    "skipped {}: depends on failed {}",
+                    package.as_source(),
+                    format_dependencies(dependencies)
+                )
+            })
+            .collect::<Vec<_>>();
+        (!lines.is_empty()).then(|| Box::new(lines.join("\n")) as Box<dyn std::fmt::Display>)
+    }
+}
+
+fn plural_packages(count: usize) -> &'static str {
+    if count == 1 { "package" } else { "packages" }
+}
+
+fn format_dependencies(dependencies: &[PackageName]) -> String {
+    dependencies
+        .iter()
+        .map(|name| format!("`{}`", name.as_source()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl From<InvalidPackageNameError> for SourceBuildError {
@@ -449,6 +572,52 @@ mod tests {
 
     fn metadata_error() -> BuildBackendMetadataError {
         BuildBackendMetadataError::Discovery(Arc::new(discovery_failure()))
+    }
+
+    fn failure(package: &str, error: SourceBuildError) -> SourceBuildFailure {
+        SourceBuildFailure {
+            package: PackageName::new_unchecked(package),
+            manifest_source: Box::new(
+                pixi_record::PinnedPathSpec {
+                    path: "some/path".into(),
+                }
+                .into(),
+            ),
+            error,
+            help: None,
+        }
+    }
+
+    fn dependency_failed(package: &str, dependency: &str) -> SourceBuildError {
+        SourceBuildError::DependencyFailed {
+            package: PackageName::new_unchecked(package),
+            dependencies: vec![PackageName::new_unchecked(dependency)],
+        }
+    }
+
+    #[test]
+    fn failures_summarise_failed_and_skipped_separately() {
+        let failures = SourceBuildFailures::from_vec(vec![
+            failure("a", SourceBuildError::MissingOutputFile("out".into())),
+            failure("b", dependency_failed("b", "a")),
+            failure("c", dependency_failed("c", "a")),
+        ])
+        .expect("non-empty");
+
+        assert_eq!(
+            failures.to_string(),
+            "1 source package failed to build, 2 skipped"
+        );
+        assert_eq!(failures.related().unwrap().count(), 1);
+        assert_eq!(
+            failures.help().unwrap().to_string(),
+            "skipped b: depends on failed `a`\nskipped c: depends on failed `a`"
+        );
+    }
+
+    #[test]
+    fn no_failures_yields_nothing_to_report() {
+        assert!(SourceBuildFailures::from_vec(Vec::new()).is_none());
     }
 
     #[test]

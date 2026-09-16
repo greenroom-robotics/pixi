@@ -19,7 +19,8 @@ use pixi_auth::get_auth_store;
 use pixi_build_frontend::BackendOverride;
 use pixi_command_dispatcher::{
     BackendMetadataDir, BuildBackendMetadataSpec, BuildEnvironment, BuildProfile, CacheDirs,
-    ComputeResultExt, CondaPackageFormat, EnvironmentRef, EnvironmentSpec, EphemeralEnv,
+    CommandDispatcherError, ComputeResultExt, CondaPackageFormat, EnvironmentRef, EnvironmentSpec,
+    EphemeralEnv, SourceBuildFailure, SourceBuildFailures,
     keys::{ResolveSourcePackageKey, ResolveSourcePackageSpec, SourceBuildKey, SourceBuildSpec},
 };
 use pixi_config::{ConfigCli, IndexChannelConfig, IndexConfig, PackageFormatAndCompression};
@@ -1039,12 +1040,18 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     // the variant that produced it.
     let mut built_packages: Vec<(PathBuf, BTreeMap<String, VariantValue>)> = Vec::new();
     let mut seen_artifacts: BTreeSet<PathBuf> = BTreeSet::new();
+    // Every package is attempted; the failures are reported together once
+    // the loop is done.
+    let mut build_failures: Vec<SourceBuildFailure> = Vec::new();
 
     for record in resolved_records {
         let record = Arc::unwrap_or_clone(record);
         let variants = record.variants.clone();
+        let record: pixi_record::UnresolvedSourceRecord = record.into();
+        let package = record.name().clone();
+        let manifest_source = Box::new(record.manifest_source.clone());
         let build_spec = SourceBuildSpec {
-            record: Arc::new(record.into()),
+            record: Arc::new(record),
             channels: channels.clone(),
             exclude_newer: None,
             build_environment: build_environment.clone(),
@@ -1063,10 +1070,23 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             .engine()
             .compute(&SourceBuildKey::new(build_spec))
             .await
-            .map_err_into_dispatcher(std::convert::identity)
-            .into_diagnostic()?;
+            .map_err_into_dispatcher(std::convert::identity);
 
         progress.on_clear();
+
+        let built = match built {
+            Ok(built) => built,
+            Err(CommandDispatcherError::Cancelled) => return Err(miette::miette!("cancelled")),
+            Err(CommandDispatcherError::Failed(error)) => {
+                build_failures.push(SourceBuildFailure {
+                    package,
+                    manifest_source,
+                    error,
+                    help: None,
+                });
+                continue;
+            }
+        };
 
         let package_path = dunce::canonicalize(&built.artifact)
             .expect("failed to canonicalize output file which must now exist");
@@ -1074,6 +1094,10 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         if seen_artifacts.insert(package_path.clone()) {
             built_packages.push((package_path, variants));
         }
+    }
+
+    if let Some(failures) = SourceBuildFailures::from_vec(build_failures) {
+        return Err(failures.into());
     }
 
     // Release the repodata gateway before indexing. It memory-maps the target

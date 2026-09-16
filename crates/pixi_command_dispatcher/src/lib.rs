@@ -105,8 +105,8 @@ pub use ephemeral_env::{
     EphemeralEnvError, EphemeralEnvKey, EphemeralEnvSpec, InstalledEphemeralEnv,
 };
 pub use errors::{
-    MissingChannelError, SolvePixiEnvironmentError, SourceBuildError, SourceMetadataError,
-    SourceRecordError,
+    MissingChannelError, SolvePixiEnvironmentError, SourceBuildError, SourceBuildFailure,
+    SourceBuildFailures, SourceMetadataError, SourceRecordError,
 };
 pub use injected_config::{
     BackendOverrideKey, ChannelConfigKey, EnabledProtocolsKey, ToolBuildEnvironmentKey,

@@ -1200,6 +1200,7 @@ impl Workspace {
             .with_max_download_concurrency(self.concurrent_downloads_semaphore())
             .with_limits(Limits {
                 max_concurrent_solves: self.config().max_concurrent_solves().into(),
+                max_concurrent_builds: self.config().max_concurrent_builds().into(),
                 ..Limits::default()
             })
             .with_backend_overrides(
