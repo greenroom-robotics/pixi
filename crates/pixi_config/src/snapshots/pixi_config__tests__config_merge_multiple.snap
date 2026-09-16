@@ -149,6 +149,7 @@ Config {
     concurrency: ConcurrencyConfig {
         solves: 1,
         downloads: 50,
+        builds: 1,
     },
     run_post_link_scripts: None,
     allow_symbolic_links: None,
