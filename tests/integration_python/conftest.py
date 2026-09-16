@@ -72,10 +72,14 @@ def setup_build_backend_override(request: pytest.FixtureRequest) -> None:
         "pixi-build-rust",
     ]
 
+    # The ROS backend ships as `pixi-build-ros-gr`, while manifests still
+    # request it under the name upstream gives it.
+    binaries = {"pixi-build-ros": "pixi-build-ros-gr"}
+
     override_parts: list[str] = []
     missing_files: list[Path] = []
     for backend in backends:
-        backend_path = backends_bin_dir / exec_extension(backend)
+        backend_path = backends_bin_dir / exec_extension(binaries.get(backend, backend))
         if backend_path.is_file():
             override_parts.append(f"{backend}={backend_path}")
         else:
