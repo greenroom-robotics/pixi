@@ -110,6 +110,10 @@ downloads = 5
 # The maximum number of concurrent dependency resolves
 # Defaults to a heuristic based on the number of cores on the system
 solves = 2
+
+# The maximum number of concurrent source builds
+# Defaults to 1 as builds are resource heavy
+builds = 2
 # --8<-- [end:concurrency]
 
 #  --8<-- [start:experimental]

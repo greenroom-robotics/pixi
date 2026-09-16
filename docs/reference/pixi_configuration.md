@@ -350,7 +350,10 @@ Set them through the CLI with:
 ```shell
 pixi config set concurrency.solves 1
 pixi config set concurrency.downloads 12
+pixi config set concurrency.builds 4
 ```
+
+`concurrency.builds` limits how many source packages are built at the same time. It defaults to `1` because builds are resource heavy.
 
 ### `run-post-link-scripts`
 
