@@ -728,6 +728,11 @@ pub struct ConfigCli {
     #[arg(long, env = "PIXI_NO_REF_LINKS", help_heading = consts::CLAP_CONFIG_OPTIONS)]
     pub no_ref_links: bool,
 
+    /// Keep building the remaining source packages after one fails, and
+    /// report every failure together at the end.
+    #[arg(long, action = ArgAction::SetTrue, help_heading = consts::CLAP_CONFIG_OPTIONS)]
+    pub keep_going: bool,
+
     /// Do not verify the TLS certificate of the server.
     #[arg(long, action = ArgAction::SetTrue, help_heading = consts::CLAP_CONFIG_OPTIONS)]
     pub tls_no_verify: bool,
@@ -1350,6 +1355,13 @@ pub struct Config {
     #[serde(skip_serializing_if = "BuildConfig::is_default")]
     pub build: BuildConfig,
 
+    /// If set to true, a failing source build does not abort the remaining
+    /// source builds; they run to completion and every failure is reported
+    /// together at the end.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_going: Option<bool>,
+
     /// The platform to use when installing tools.
     ///
     /// When running on certain platforms, you might want to install build
@@ -1408,6 +1420,7 @@ impl Default for Config {
             allow_ref_links: None,
             proxy_config: ProxyConfig::default(),
             build: BuildConfig::default(),
+            keep_going: None,
             tool_platform: None,
             cache: CacheConfig::default(),
 
@@ -1561,6 +1574,7 @@ impl From<ConfigCli> for Config {
                 conda_script: None,
             },
             pinning_strategy: cli.pinning_strategy,
+            keep_going: cli.keep_going.then_some(true),
             allow_symbolic_links: cli.no_symbolic_links.then_some(false),
             allow_hard_links: cli.no_hard_links.then_some(false),
             allow_ref_links: cli.no_ref_links.then_some(false),
@@ -2090,6 +2104,7 @@ impl Config {
             "index-config.base-url",
             "index-config.write-shards",
             "index-config.write-zst",
+            "keep-going",
             "mirrors",
             "offline",
             "pinning-strategy",
@@ -2205,6 +2220,7 @@ impl Config {
                 .build
                 .merge_config(&other.build)
                 .expect("BuildConfig::merge_config is infallible"),
+            keep_going: other.keep_going.or(self.keep_going),
             tool_platform: self.tool_platform.or(other.tool_platform),
             cache: self.cache.merge(other.cache),
 
@@ -2276,6 +2292,12 @@ impl Config {
 
     pub fn mirror_map(&self) -> &std::collections::HashMap<Url, Vec<Url>> {
         &self.mirrors
+    }
+
+    /// Whether a failing source build lets the remaining source builds run
+    /// to completion (defaults to false, aborting at the first failure).
+    pub fn keep_going(&self) -> bool {
+        self.keep_going.unwrap_or(false)
     }
 
     /// Retrieve the value for the target_environments_directory field.
@@ -2390,6 +2412,9 @@ impl Config {
             }
             "offline" => {
                 self.offline = value.map(|v| v.parse()).transpose().into_diagnostic()?;
+            }
+            "keep-going" => {
+                self.keep_going = value.map(|v| v.parse()).transpose().into_diagnostic()?;
             }
             "tls-root-certs" => {
                 self.tls_root_certs = value
@@ -3140,6 +3165,7 @@ UNUSED = "unused"
             no_ref_links: false,
             use_environment_activation_cache: true,
             pinning_strategy: Some(PinningStrategy::Semver),
+            keep_going: true,
         };
         let config = Config::from(cli);
         assert_eq!(config.tls_no_verify, Some(true));
@@ -3161,6 +3187,7 @@ UNUSED = "unused"
             Some(true)
         );
         assert_eq!(config.pinning_strategy, Some(PinningStrategy::Semver));
+        assert_eq!(config.keep_going, Some(true));
 
         let cli = ConfigCli {
             tls_no_verify: false,
@@ -3176,6 +3203,7 @@ UNUSED = "unused"
             no_ref_links: false,
             use_environment_activation_cache: false,
             pinning_strategy: None,
+            keep_going: false,
         };
 
         let config = Config::from(cli);
@@ -3189,6 +3217,22 @@ UNUSED = "unused"
         assert_eq!(config.run_post_link_scripts, None);
         assert_eq!(config.experimental.use_environment_activation_cache, None);
         assert_eq!(config.pinning_strategy, None);
+        assert_eq!(config.keep_going, None);
+    }
+
+    #[test]
+    fn test_keep_going_config() {
+        let (config, _) = Config::from_toml("keep-going = true", None).unwrap();
+        assert_eq!(config.keep_going, Some(true));
+        assert!(config.keep_going());
+
+        let config = Config::default();
+        assert_eq!(config.keep_going, None);
+        assert!(!config.keep_going());
+
+        let mut config = Config::default();
+        config.set("keep-going", Some("true".to_string())).unwrap();
+        assert!(config.keep_going());
     }
 
     #[test]
@@ -3477,6 +3521,7 @@ UNUSED = "unused"
             allow_ref_links: Some(false),
             proxy_config: ProxyConfig::default(),
             build: BuildConfig::default(),
+            keep_going: None,
             tool_platform: None,
             cache: CacheConfig {
                 root: Some(PathBuf::from("/some/cache/root")),

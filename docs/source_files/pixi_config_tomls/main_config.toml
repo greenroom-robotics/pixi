@@ -22,6 +22,11 @@ tls-root-certs = "system"
 offline = true
 # --8<-- [end:offline]
 
+# --8<-- [start:keep-going]
+# Keep building the remaining source packages after one fails.
+keep-going = true
+# --8<-- [end:keep-going]
+
 # --8<-- [start:authentication-override-file]
 authentication-override-file = "/path/to/your/override.json"
 # --8<-- [end:authentication-override-file]
