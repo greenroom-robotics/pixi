@@ -60,8 +60,12 @@ def read_version() -> str:
         return tomllib.load(f)["package"]["version"]
 
 
-def build(target: str, dry_run: bool) -> Path:
-    env_extra = {}
+def build(target: str, version: str, dry_run: bool) -> Path:
+    # `pixi --version` reads consts::PIXI_VERSION, whose fallback is a hardcoded
+    # string that only upstream's tbump run keeps in step with Cargo.toml. Set
+    # the compile-time override so the release tag is the single source of truth
+    # and a binary can never self-report a stale version.
+    env_extra = {"PIXI_VERSION": version}
     # aarch64 Linux hosts may use 64 KiB pages; jemalloc needs the page size at
     # compile time. Mirrors scripts/build_options.py.
     if target.startswith("aarch64-"):
@@ -132,7 +136,7 @@ def main() -> None:
 
     assets = [INSTALL_SH]
     for arch, target in TARGETS.items():
-        assets.append(package(build(target, args.dry_run), arch, args.dry_run))
+        assets.append(package(build(target, version, args.dry_run), arch, args.dry_run))
 
     existing = subprocess.run(
         ["git", "rev-parse", f"{tag}^{{commit}}"], capture_output=True, text=True
