@@ -40,13 +40,11 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
-toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true, features = ["filters", "redactions", "yaml"] }
-ordermap = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 
