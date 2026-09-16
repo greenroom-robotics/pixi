@@ -1,10 +1,11 @@
 """Cover keep-going source builds and the failure summary they produce.
 
-A source build failure no longer aborts sibling builds: packages that do not
-depend on the failed one still build, packages that do depend on it are
-reported as skipped, and the final summary/log-tail wording matches
-`SourceBuildFailures` (crates/pixi_command_dispatcher/src/errors.rs) and the
-build-failure reporting in crates/pixi_reporters/src/sync_reporter.rs.
+Under `--keep-going` a source build failure does not abort sibling builds:
+packages that do not depend on the failed one still build, packages that do
+depend on it are reported as skipped, and the final summary/log-tail wording
+matches `SourceBuildFailures` (crates/pixi_command_dispatcher/src/errors.rs)
+and the build-failure reporting in crates/pixi_reporters/src/sync_reporter.rs.
+Without the flag the first failure aborts the remaining builds.
 """
 
 from pathlib import Path
@@ -41,7 +42,7 @@ def test_keep_going_reports_failure_and_skips_dependents(
     )
 
     output = verify_cli_command(
-        [pixi, "install", "--manifest-path", manifest_path],
+        [pixi, "install", "--keep-going", "--manifest-path", manifest_path],
         expected_exit_code=ExitCode.FAILURE,
         env=env,
         stderr_contains=[
@@ -97,10 +98,62 @@ def test_keep_going_verbose_streams_backend_output(
     )
 
     verify_cli_command(
-        [pixi, "install", "-v", "--manifest-path", manifest_path],
+        [pixi, "install", "-v", "--keep-going", "--manifest-path", manifest_path],
         expected_exit_code=ExitCode.FAILURE,
         env=env,
         stderr_contains=["[bad] "],
+    )
+
+
+@pytest.mark.slow
+def test_without_keep_going_first_failure_aborts(
+    pixi: Path, build_data: Path, tmp_pixi_workspace: Path
+) -> None:
+    test_data = build_data.joinpath("rattler-build-backend")
+    workspace_dir = tmp_pixi_workspace / "keep-going"
+    copytree_with_local_backend(test_data / "keep-going", workspace_dir)
+
+    env = {"PIXI_CACHE_DIR": str(tmp_pixi_workspace / "pixi-cache")}
+    manifest_path = workspace_dir / "pixi.toml"
+
+    verify_cli_command(
+        [pixi, "install", "--manifest-path", manifest_path],
+        expected_exit_code=ExitCode.FAILURE,
+        env=env,
+        stderr_excludes=["1 source package failed to build, 1 skipped"],
+    )
+
+
+@pytest.mark.slow
+def test_keep_going_can_be_enabled_through_config(
+    pixi: Path, build_data: Path, tmp_pixi_workspace: Path
+) -> None:
+    test_data = build_data.joinpath("rattler-build-backend")
+    workspace_dir = tmp_pixi_workspace / "keep-going"
+    copytree_with_local_backend(test_data / "keep-going", workspace_dir)
+
+    env = {"PIXI_CACHE_DIR": str(tmp_pixi_workspace / "pixi-cache")}
+    manifest_path = workspace_dir / "pixi.toml"
+
+    verify_cli_command(
+        [
+            pixi,
+            "config",
+            "set",
+            "--manifest-path",
+            manifest_path,
+            "--local",
+            "keep-going",
+            "true",
+        ],
+        env=env,
+    )
+
+    verify_cli_command(
+        [pixi, "install", "--manifest-path", manifest_path],
+        expected_exit_code=ExitCode.FAILURE,
+        env=env,
+        stderr_contains=["1 source package failed to build, 1 skipped"],
     )
 
 

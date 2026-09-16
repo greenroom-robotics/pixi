@@ -7,7 +7,7 @@ use crate::cache::{
 };
 use crate::compute_data::{
     AllowExecuteLinkScripts, AllowLinkOptions, BackendSourceBuildSemaphore, CondaSolveSemaphore,
-    IoConcurrencySemaphore,
+    IoConcurrencySemaphore, KeepGoingSourceBuilds,
 };
 use crate::environment::WorkspaceEnvRegistry;
 use crate::injected_config::{
@@ -59,6 +59,7 @@ pub struct CommandDispatcherBuilder {
     executor: Executor,
     tool_platform: Option<(Platform, Vec<GenericVirtualPackage>)>,
     execute_link_scripts: bool,
+    keep_going_source_builds: bool,
     offline: bool,
     channel_config: Option<ChannelConfig>,
     enabled_protocols: Option<EnabledProtocols>,
@@ -305,6 +306,16 @@ impl CommandDispatcherBuilder {
         }
     }
 
+    /// Whether a failing source build lets the remaining source builds run
+    /// to completion, reporting every failure at the end, instead of
+    /// aborting at the first one.
+    pub fn keep_going_source_builds(self, keep_going: bool) -> Self {
+        Self {
+            keep_going_source_builds: keep_going,
+            ..self
+        }
+    }
+
     /// Sets whether the dispatcher runs in offline mode. In offline mode
     /// operations that require network access outside of the (already
     /// offline-guarded) download client, like git fetches, are refused.
@@ -455,6 +466,7 @@ impl CommandDispatcherBuilder {
             package_cache,
             tool_platform,
             execute_link_scripts: self.execute_link_scripts,
+            keep_going_source_builds: self.keep_going_source_builds,
             allow_symbolic_links: self.allow_symbolic_links,
             allow_hard_links: self.allow_hard_links,
             allow_ref_links: self.allow_ref_links,
@@ -486,6 +498,7 @@ impl CommandDispatcherBuilder {
             .with_data(data.package_cache.clone())
             .with_data(data.workspace_env_registry.clone())
             .with_data(AllowExecuteLinkScripts(data.execute_link_scripts))
+            .with_data(KeepGoingSourceBuilds(data.keep_going_source_builds))
             .with_data(AllowLinkOptions {
                 allow_symbolic_links: data.allow_symbolic_links,
                 allow_hard_links: data.allow_hard_links,

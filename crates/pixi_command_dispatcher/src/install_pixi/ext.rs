@@ -19,8 +19,8 @@ use crate::CommandDispatcherError;
 use crate::CondaPackageFormat;
 use crate::cache::markers::{SourceBuildArtifactsDir, SourceBuildWorkspacesDir};
 use crate::compute_data::{
-    HasAllowExecuteLinkScripts, HasAllowLinkOptions, HasIoConcurrencySemaphore, HasPackageCache,
-    HasPixiInstallReporter,
+    HasAllowExecuteLinkScripts, HasAllowLinkOptions, HasIoConcurrencySemaphore,
+    HasKeepGoingSourceBuilds, HasPackageCache, HasPixiInstallReporter,
 };
 use crate::errors::{SourceBuildFailure, SourceBuildFailures};
 use crate::install_pixi::{
@@ -144,8 +144,9 @@ async fn install_inner(
     }
 
     // Build source packages concurrently via SourceBuildKey. Each branch
-    // gets a sub-ctx; every record is attempted so one broken package does
-    // not hide the state of the others.
+    // gets a sub-ctx. Keep-going attempts every record so one broken
+    // package does not hide the state of the others; otherwise the first
+    // failure aborts the remaining builds.
     let shared = SharedBuildParams {
         channels: spec.channels.clone(),
         exclude_newer: spec.exclude_newer.clone(),
@@ -212,14 +213,21 @@ async fn install_inner(
                 })
         }
     };
-    let (built_sources, failures): (Vec<_>, Vec<_>) = ctx
-        .compute_join(source_records, mapper)
-        .await
-        .into_iter()
-        .partition_map(|result| match result {
-            Ok(built) => Either::Left(built),
-            Err(failure) => Either::Right(failure),
-        });
+    let (built_sources, failures): (Vec<_>, Vec<_>) =
+        if ctx.global_data().keep_going_source_builds() {
+            ctx.compute_join(source_records, mapper)
+                .await
+                .into_iter()
+                .partition_map(|result| match result {
+                    Ok(built) => Either::Left(built),
+                    Err(failure) => Either::Right(failure),
+                })
+        } else {
+            match ctx.try_compute_join(source_records, mapper).await {
+                Ok(built) => (built, Vec::new()),
+                Err(failure) => (Vec::new(), vec![failure]),
+            }
+        };
     if let Some(failures) = SourceBuildFailures::from_vec(failures) {
         return Err(CommandDispatcherError::Failed(failures.into()));
     }
