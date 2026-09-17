@@ -7,7 +7,7 @@ license.workspace = true
 name = "pixi"
 readme.workspace = true
 repository.workspace = true
-version = "0.73.3"
+version = "0.73.4"
 
 [features]
 default = ["rustls"]
