@@ -3187,8 +3187,9 @@ async fn spawn_solve_conda_environment_task(
 /// dependency was added to it.
 pub enum ProbeOutcome {
     Solvable,
-    /// The solver's user-friendly explanation of the conflict.
-    Unsolvable(String),
+    /// The solver's user-friendly explanations of the conflict, one per
+    /// independent reason it reported.
+    Unsolvable(Vec<String>),
 }
 
 /// Re-solves the conda dependencies of a single environment/platform with one
@@ -3235,7 +3236,7 @@ pub async fn probe_conda_solve(
     }
 }
 
-fn unsolvable_explanation(err: &SolveCondaEnvironmentError) -> Option<String> {
+fn unsolvable_explanation(err: &SolveCondaEnvironmentError) -> Option<Vec<String>> {
     let SolveCondaEnvironmentError::SolveFailed { source, .. } = err else {
         return None;
     };
@@ -3243,7 +3244,7 @@ fn unsolvable_explanation(err: &SolveCondaEnvironmentError) -> Option<String> {
         return None;
     };
     match &**solve_error {
-        rattler_solve::SolveError::Unsolvable(reasons) => Some(reasons.join("\n")),
+        rattler_solve::SolveError::Unsolvable(reasons) => Some(reasons.clone()),
         _ => None,
     }
 }
