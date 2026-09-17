@@ -63,6 +63,8 @@ pixi workspace export conda-explicit-spec [OPTIONS] <OUTPUT_DIR>
 - <a id="arg---no-ref-links" href="#arg---no-ref-links">`--no-ref-links`</a>
 :  Disallow ref links (copy-on-write) during package installation
 <br>**env**: `PIXI_NO_REF_LINKS`
+- <a id="arg---keep-going" href="#arg---keep-going">`--keep-going`</a>
+:  Keep building the remaining source packages after one fails, and report every failure together at the end
 - <a id="arg---tls-no-verify" href="#arg---tls-no-verify">`--tls-no-verify`</a>
 :  Do not verify the TLS certificate of the server
 - <a id="arg---offline" href="#arg---offline">`--offline=<OFFLINE>`</a>

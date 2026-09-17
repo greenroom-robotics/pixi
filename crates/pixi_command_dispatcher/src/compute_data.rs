@@ -173,6 +173,25 @@ impl HasAllowExecuteLinkScripts for DataStore {
     }
 }
 
+/// Newtype around the `keep_going_source_builds` bool so it can be stored
+/// in [`DataStore`] keyed by its own `TypeId`.
+#[derive(Copy, Clone, Debug)]
+pub struct KeepGoingSourceBuilds(pub bool);
+
+/// Access whether a failing source build lets the remaining builds run to
+/// completion instead of aborting at the first failure.
+pub trait HasKeepGoingSourceBuilds {
+    fn keep_going_source_builds(&self) -> bool;
+}
+
+impl HasKeepGoingSourceBuilds for DataStore {
+    fn keep_going_source_builds(&self) -> bool {
+        self.try_get::<KeepGoingSourceBuilds>()
+            .map(|v| v.0)
+            .unwrap_or(false)
+    }
+}
+
 /// Configured allow/disallow preferences for installation link methods,
 /// stored in the [`DataStore`] keyed by `TypeId`. Mirrors the fields on
 /// [`rattler::install::LinkOptions`] but is `Copy`/`Clone`/`Debug` so it

@@ -222,6 +222,18 @@ Offline mode works best after the caches have been populated by running the same
 --8<-- "docs/source_files/pixi_config_tomls/main_config.toml:offline"
 ```
 
+### `keep-going`
+
+When set to `true`, a source build that fails no longer aborts the source builds running alongside it.
+Every source package that does not depend on the failed one is still built, and all failures are reported together at the end.
+You can also enable this from the CLI with `--keep-going`.
+
+Defaults to `false`: the first source build failure cancels the remaining builds and is reported on its own.
+
+```toml title="config.toml"
+--8<-- "docs/source_files/pixi_config_tomls/main_config.toml:keep-going"
+```
+
 ### `authentication-override-file`
 
 Override from where the authentication information is loaded.
