@@ -40,6 +40,7 @@ pixi [OPTIONS] [COMMAND]
 | [`update`](update.md) | Updates dependencies to newer compatible versions |
 | [`upgrade`](upgrade.md) | Checks if there are newer versions of the dependencies and upgrades them in the lock file and manifest file |
 | [`upload`](upload/index.md) | Upload conda packages to various channels |
+| [`why-not`](why-not.md) | Explain why the solver cannot give you a version of a package |
 | [`workspace`](workspace/index.md) | Modify the workspace configuration file through the command line |
 
 

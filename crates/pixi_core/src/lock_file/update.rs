@@ -41,6 +41,7 @@ use pixi_manifest::{
 };
 use pixi_progress::global_multi_progress;
 use pixi_record::{LockFileResolver, ParseLockFileError, PixiRecord, UnresolvedPixiRecord};
+use pixi_spec::PixiSpec;
 use pixi_utils::{prefix::Prefix, variants::VariantConfig};
 use pixi_uv_context::UvResolutionContext;
 use pixi_uv_conversions::{
@@ -2388,6 +2389,7 @@ impl<'p> UpdateContext<'p> {
                     channel_priority,
                     command_dispatcher,
                     pin_overrides,
+                    None,
                 )
                 .map(|result| result.map_err_with(Report::new))
                 .boxed_local();
@@ -2980,6 +2982,7 @@ async fn spawn_solve_conda_environment_task(
     channel_priority: ChannelPriority,
     command_dispatcher: CommandDispatcher,
     pin_overrides: BTreeMap<rattler_conda_types::PackageName, pixi_record::PinnedSourceSpec>,
+    extra_dependency: Option<(rattler_conda_types::PackageName, PixiSpec)>,
 ) -> Result<TaskResult, CommandDispatcherError<SolveCondaEnvironmentError>> {
     let pixi_platform = group
         .workspace_manifest()
@@ -2987,7 +2990,10 @@ async fn spawn_solve_conda_environment_task(
         .platform_by_name(&platform);
 
     // Get the dependencies for this platform
-    let dependencies = group.combined_dependencies(pixi_platform);
+    let mut dependencies = group.combined_dependencies(pixi_platform);
+    if let Some((name, spec)) = extra_dependency {
+        dependencies.insert(name, spec);
+    }
 
     // Get the dev dependencies for this platform
     let dev_dependencies = group.combined_dev_dependencies(pixi_platform);
@@ -3175,6 +3181,71 @@ async fn spawn_solve_conda_environment_task(
         records_by_name,
         end - start,
     ))
+}
+
+/// Whether the conda solve of an environment succeeded once an extra
+/// dependency was added to it.
+pub enum ProbeOutcome {
+    Solvable,
+    /// The solver's user-friendly explanation of the conflict.
+    Unsolvable(String),
+}
+
+/// Re-solves the conda dependencies of a single environment/platform with one
+/// extra dependency added, without touching the lock file or any prefix.
+pub async fn probe_conda_solve(
+    workspace: &Workspace,
+    environment: &Environment<'_>,
+    platform: &PixiPlatformName,
+    extra_dependency: (PackageName, PixiSpec),
+    progress: Option<&Arc<pixi_reporters::TopLevelProgress>>,
+) -> miette::Result<ProbeOutcome> {
+    let command_dispatcher = workspace.command_dispatcher_builder(progress)?.finish();
+    let mapping_client = PurlDerivationClient::builder(
+        workspace.authenticated_client()?.clone(),
+        workspace
+            .config()
+            .cache_dir_for(pixi_config::CacheKind::PypiMapping)?,
+        workspace.config().offline(),
+    )
+    .with_concurrency_limit(workspace.concurrent_downloads_semaphore())
+    .finish();
+
+    let group = GroupedEnvironment::from(environment.clone());
+    let channel_priority = group.channel_priority()?.unwrap_or_default();
+
+    match spawn_solve_conda_environment_task(
+        group,
+        Arc::default(),
+        mapping_client,
+        platform.clone(),
+        channel_priority,
+        command_dispatcher,
+        BTreeMap::new(),
+        Some(extra_dependency),
+    )
+    .await
+    {
+        Ok(_) => Ok(ProbeOutcome::Solvable),
+        Err(CommandDispatcherError::Cancelled) => Err(miette::miette!("the solve was cancelled")),
+        Err(CommandDispatcherError::Failed(err)) => match unsolvable_explanation(&err) {
+            Some(explanation) => Ok(ProbeOutcome::Unsolvable(explanation)),
+            None => Err(Report::new(err)),
+        },
+    }
+}
+
+fn unsolvable_explanation(err: &SolveCondaEnvironmentError) -> Option<String> {
+    let SolveCondaEnvironmentError::SolveFailed { source, .. } = err else {
+        return None;
+    };
+    let SolvePixiEnvironmentError::SolveError(solve_error) = &**source else {
+        return None;
+    };
+    match &**solve_error {
+        rattler_solve::SolveError::Unsolvable(reasons) => Some(reasons.join("\n")),
+        _ => None,
+    }
 }
 
 /// Distill the repodata that is applicable for the given `environment` from the

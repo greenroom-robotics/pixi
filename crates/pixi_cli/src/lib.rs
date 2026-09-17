@@ -55,6 +55,7 @@ pub mod tree;
 pub mod update;
 pub mod upgrade;
 pub mod upload;
+pub mod why_not;
 pub mod workspace;
 
 #[derive(Parser, Debug)]
@@ -208,6 +209,7 @@ pub enum Command {
     Update(update::Args),
     Upgrade(upgrade::Args),
     Upload(upload::Args),
+    WhyNot(why_not::Args),
     #[clap(alias = "project")]
     Workspace(workspace::Args),
     #[command(external_subcommand)]
@@ -401,6 +403,7 @@ pub async fn execute_command(
         Command::SelfUpdate(cmd) => self_update::execute_stub(cmd, global_options).await,
         Command::List(cmd) => list::execute(cmd).await,
         Command::Tree(cmd) => tree::execute(cmd).await,
+        Command::WhyNot(cmd) => why_not::execute(cmd).await,
         Command::Update(cmd) => update::execute(cmd).await,
         Command::Upgrade(cmd) => upgrade::execute(cmd).await,
         Command::Lock(cmd) => lock::execute(cmd).await,

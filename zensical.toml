@@ -262,6 +262,7 @@ nav = [
               { "s3" = "reference/cli/pixi/upload/s3.md" },
             ]
           },
+          { "why-not" = "reference/cli/pixi/why-not.md" },
           {
             "workspace" = [
               "reference/cli/pixi/workspace/index.md",
