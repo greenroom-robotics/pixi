@@ -28,8 +28,9 @@ pub use satisfiability::{
     resolve_lock_platform_for, verify_environment_satisfiability, verify_platform_satisfiability,
 };
 pub use update::{
-    LockFileDerivedData, PackageFilterNames, ReinstallEnvironment, ReinstallPackages,
+    LockFileDerivedData, PackageFilterNames, ProbeOutcome, ReinstallEnvironment, ReinstallPackages,
     SolveCondaEnvironmentError, UpdateContext, UpdateLockFileOptions, UpdateMode, UpdatedPrefix,
+    probe_conda_solve,
 };
 pub use utils::{LockedPackageKind, filter_lock_file};
 
