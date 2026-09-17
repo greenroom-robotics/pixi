@@ -202,7 +202,7 @@ fn render_line(indent: &str, connector: &str, text: &str, count: usize) -> Strin
         None => consts::CONDA_PACKAGE_STYLE.apply_to(subject).to_string(),
     };
     let badge = if count > 1 {
-        format!(" (×{count})")
+        format!(" ({count} builds)")
     } else {
         String::new()
     };
@@ -287,7 +287,7 @@ The following packages are incompatible
             "\
 The following packages are incompatible
 ├─ python >=3.14,<3.15 cannot be installed because there are no viable options:
-│  ├─ python 3.14.7 (×2), which conflicts with the versions reported above.
+│  ├─ python 3.14.7 (2 builds), which conflicts with the versions reported above.
 │  └─ python 3.14.0, which conflicts with the versions reported above.
 └─ python ==3.12 cannot be installed because there are no viable options:
    └─ python 3.12.0, which conflicts with the versions reported above."
