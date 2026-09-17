@@ -123,11 +123,16 @@ impl BackendSourceBuildReporter for SyncReporter {
         mut backend_output_stream: Box<dyn Stream<Item = String> + Unpin + Send>,
     ) {
         // `pixi_reporters` has no explicit EnvFilter directive of its own, so
-        // it inherits the `pixi` crate's level, which is WARN by default and
-        // INFO at `-v` and above: this is the level that separates them.
-        let stream_to_screen = tracing::event_enabled!(tracing::Level::INFO);
+        // it inherits the `pixi` crate's level: OFF under `--quiet`, WARN by
+        // default, INFO at `-v` and above.
+        let verbose = tracing::event_enabled!(tracing::Level::INFO);
+        let quiet = !tracing::event_enabled!(tracing::Level::WARN);
 
         let mut builds = self.builds.lock();
+        // A started build holds an output slot; only queued ones are `None`.
+        // Alone on screen, its lines can be printed without interleaving.
+        let alone = !builds.values().any(|build| build.output.is_some());
+        let stream_to_screen = verbose || (alone && !quiet);
         let Some(build) = builds.get_mut(&id) else {
             return;
         };

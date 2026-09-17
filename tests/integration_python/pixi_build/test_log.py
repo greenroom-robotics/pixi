@@ -10,6 +10,7 @@ def test_log_working_quiet(pixi: Path, build_data: Path, tmp_pixi_workspace: Pat
 
     copytree_with_local_backend(test_data, tmp_pixi_workspace, dirs_exist_ok=True)
 
+    env = {"PIXI_CACHE_DIR": str(tmp_pixi_workspace / "pixi-cache")}
     verify_cli_command(
         [
             pixi,
@@ -18,7 +19,8 @@ def test_log_working_quiet(pixi: Path, build_data: Path, tmp_pixi_workspace: Pat
             "--manifest-path",
             tmp_pixi_workspace,
         ],
-        stderr_excludes="Building package simple-app",
+        env=env,
+        stderr_excludes=["Building package simple-app", "[simple-app] "],
     )
 
 
@@ -27,6 +29,8 @@ def test_log_working_default(pixi: Path, build_data: Path, tmp_pixi_workspace: P
 
     copytree_with_local_backend(test_data, tmp_pixi_workspace, dirs_exist_ok=True)
 
+    # A lone build streams its backend output even without `-v`.
+    env = {"PIXI_CACHE_DIR": str(tmp_pixi_workspace / "pixi-cache")}
     verify_cli_command(
         [
             pixi,
@@ -34,7 +38,8 @@ def test_log_working_default(pixi: Path, build_data: Path, tmp_pixi_workspace: P
             "--manifest-path",
             tmp_pixi_workspace,
         ],
-        stderr_excludes="Building package simple-app",
+        env=env,
+        stderr_contains=["[simple-app] ", "Building package simple-app"],
     )
 
 
