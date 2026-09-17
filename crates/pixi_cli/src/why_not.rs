@@ -3,6 +3,7 @@ use clap::Parser;
 use fancy_display::FancyDisplay;
 use miette::{Context, IntoDiagnostic};
 use pixi_api::workspace::platforms::resolve_platforms;
+use pixi_consts::consts;
 use pixi_core::{
     WorkspaceLocator,
     lock_file::{ProbeOutcome, probe_conda_solve, resolve_lock_platform_for},
@@ -115,25 +116,141 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let outcome = outcome?;
 
     match outcome {
-        ProbeOutcome::Unsolvable(explanation) => {
+        ProbeOutcome::Unsolvable(reasons) => {
             println!(
-                "Cannot solve {} for {} with {}:",
+                "{} Cannot solve {} for {} with {}",
+                console::style("×").red().bold(),
                 environment.name().fancy_display(),
-                platform.name(),
-                spec
+                consts::PLATFORM_STYLE.apply_to(platform.name()),
+                console::style(&spec).bold(),
             );
-            println!("{explanation}");
+            for reason in reasons {
+                println!();
+                println!("{}", collapse_repeats(&reason));
+            }
         }
-        ProbeOutcome::Solvable => println!(
-            "Nothing prevents {} in {} ({}); the lock is just stale. Run: pixi update {}",
-            spec,
-            environment.name().fancy_display(),
-            platform.name(),
-            name.as_source()
-        ),
+        ProbeOutcome::Solvable => {
+            println!(
+                "{} Nothing prevents {} in {} ({})",
+                console::style("✔").green().bold(),
+                console::style(&spec).bold(),
+                environment.name().fancy_display(),
+                consts::PLATFORM_STYLE.apply_to(platform.name()),
+            );
+            println!(
+                "  The lock file is out of date. Run: {}",
+                consts::TASK_STYLE.apply_to(format!("pixi update {}", name.as_source())),
+            );
+        }
     }
 
     Ok(())
+}
+
+const BRANCH: &str = "├─ ";
+const LAST_BRANCH: &str = "└─ ";
+
+/// Splits a line of a solver explanation into its tree indent, its branch
+/// connector and the text that follows. `None` when the line is not a branch.
+fn split_branch(line: &str) -> Option<(&str, &str, &str)> {
+    [BRANCH, LAST_BRANCH].into_iter().find_map(|connector| {
+        let at = line.find(connector)?;
+        let (indent, rest) = line.split_at(at);
+        indent.chars().all(|c| c == ' ' || c == '│').then_some((
+            indent,
+            connector,
+            &rest[connector.len()..],
+        ))
+    })
+}
+
+/// The fixed phrases the solver appends after the package a line is about.
+/// Everything before one is a package name and a version or version set.
+const PHRASES: [&str; 7] = [
+    ", for which no candidates were found.",
+    ", which cannot be installed because there are no viable options:",
+    ", which conflicts with the versions reported above.",
+    ", which conflicts with any installable versions previously reported",
+    " cannot be installed because there are no viable options:",
+    " is excluded because ",
+    " would require",
+];
+
+/// Splits the text of a line at the earliest phrase that follows the package
+/// it names. The phrase is empty when the line names no package.
+fn split_phrase(text: &str) -> (&str, &str) {
+    PHRASES
+        .iter()
+        .filter_map(|phrase| text.find(phrase))
+        .min()
+        .map_or((text, ""), |at| text.split_at(at))
+}
+
+/// Renders one line: the tree and the solver's boilerplate recede, the package
+/// it names stands out. A line naming no package is left alone.
+fn render_line(indent: &str, connector: &str, text: &str, count: usize) -> String {
+    let (subject, phrase) = split_phrase(text);
+    if phrase.is_empty() {
+        return format!("{indent}{connector}{text}");
+    }
+    let subject = match subject.split_once(' ') {
+        Some((name, version)) => format!(
+            "{} {}",
+            consts::CONDA_PACKAGE_STYLE.apply_to(name),
+            console::style(version).yellow()
+        ),
+        None => consts::CONDA_PACKAGE_STYLE.apply_to(subject).to_string(),
+    };
+    let badge = if count > 1 {
+        format!(" (×{count})")
+    } else {
+        String::new()
+    };
+    let dim = |text: String| match text.is_empty() {
+        true => text,
+        false => console::style(text).dim().to_string(),
+    };
+    format!(
+        "{}{subject}{}{}",
+        dim(format!("{indent}{connector}")),
+        dim(badge),
+        dim(phrase.to_owned()),
+    )
+}
+
+/// Joins adjacent branches that repeat the same text at the same depth into
+/// one line carrying the repeat count. The solver reports a branch per build,
+/// so a version with many builds otherwise repeats verbatim dozens of times.
+fn collapse_repeats(explanation: &str) -> String {
+    fn flush(out: &mut Vec<String>, run: Option<(&str, &str, &str, usize)>) {
+        if let Some((indent, connector, text, count)) = run {
+            out.push(render_line(indent, connector, text, count));
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut run = None;
+    for line in explanation.lines() {
+        match split_branch(line) {
+            Some((indent, connector, text)) => match run {
+                Some((prev_indent, _, prev_text, count))
+                    if (prev_indent, prev_text) == (indent, text) =>
+                {
+                    run = Some((indent, connector, text, count + 1));
+                }
+                previous => {
+                    flush(&mut out, previous);
+                    run = Some((indent, connector, text, 1));
+                }
+            },
+            None => {
+                flush(&mut out, run.take());
+                out.push(render_line("", "", line, 1));
+            }
+        }
+    }
+    flush(&mut out, run);
+    out.join("\n")
 }
 
 fn locked_version(
@@ -148,4 +265,48 @@ fn locked_version(
         .find_map(|p| p.as_conda().filter(|c| c.name() == name))
         .and_then(|c| c.record())
         .map(|record| record.version.version().clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collapse_repeats;
+
+    #[test]
+    fn repeats_collapse_keeping_the_last_connector() {
+        let explanation = "\
+The following packages are incompatible
+├─ python >=3.14,<3.15 cannot be installed because there are no viable options:
+│  ├─ python 3.14.7, which conflicts with the versions reported above.
+│  ├─ python 3.14.7, which conflicts with the versions reported above.
+│  └─ python 3.14.0, which conflicts with the versions reported above.
+└─ python ==3.12 cannot be installed because there are no viable options:
+   └─ python 3.12.0, which conflicts with the versions reported above.";
+
+        assert_eq!(
+            collapse_repeats(explanation),
+            "\
+The following packages are incompatible
+├─ python >=3.14,<3.15 cannot be installed because there are no viable options:
+│  ├─ python 3.14.7 (×2), which conflicts with the versions reported above.
+│  └─ python 3.14.0, which conflicts with the versions reported above.
+└─ python ==3.12 cannot be installed because there are no viable options:
+   └─ python 3.12.0, which conflicts with the versions reported above."
+        );
+    }
+
+    #[test]
+    fn a_line_naming_no_package_is_left_alone() {
+        let explanation = "The following packages are incompatible";
+
+        assert_eq!(collapse_repeats(explanation), explanation);
+    }
+
+    #[test]
+    fn same_text_at_different_depths_does_not_merge() {
+        let explanation = "\
+├─ python 3.14.0, which conflicts.
+│  ├─ python 3.14.0, which conflicts.";
+
+        assert_eq!(collapse_repeats(explanation), explanation);
+    }
 }
