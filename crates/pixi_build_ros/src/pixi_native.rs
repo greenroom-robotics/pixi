@@ -350,12 +350,7 @@ pub async fn generate(
         generated.recipe.build.noarch = Some(Value::new_concrete(NoArchType::python(), None));
     }
 
-    // Add input globs the cache invalidator should watch. Pixi-native mode
-    // doesn't distinguish editable installs, so include the python globs too.
-    for glob in crate::globs::ROS_SOURCE_GLOBS
-        .iter()
-        .chain(crate::globs::ROS_PYTHON_SOURCE_GLOBS.iter())
-    {
+    for glob in crate::globs::ROS_SOURCE_GLOBS {
         generated.metadata_input_globs.push((*glob).to_string());
     }
     if let Some(extra) = &config.extra_input_globs {
