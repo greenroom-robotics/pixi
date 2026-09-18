@@ -713,7 +713,7 @@ mod tests {
           - numpy
           - pip
           - pkg-config
-          - ros2-distro-mutex 0.15.*
+          - ros2-distro-mutex 0.17.*
         run:
           - ros-jazzy-example-interfaces
           - ros-jazzy-launch-ros
@@ -726,7 +726,7 @@ mod tests {
           - ros-jazzy-rcutils
           - ros-jazzy-rmw
           - ros-jazzy-std-msgs
-          - ros2-distro-mutex 0.15.*
+          - ros2-distro-mutex 0.17.*
         "###);
     }
 
