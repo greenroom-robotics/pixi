@@ -399,17 +399,12 @@ impl GenerateRecipe for RosGenerator {
         &self,
         config: &Self::Config,
         _workdir: impl AsRef<Path>,
-        editable: bool,
+        _editable: bool,
     ) -> miette::Result<Vec<String>> {
         let mut result: Vec<String> = globs::ROS_SOURCE_GLOBS
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        if !editable {
-            for g in globs::ROS_PYTHON_SOURCE_GLOBS {
-                result.push((*g).to_string());
-            }
-        }
         if let Some(extra) = &config.extra_input_globs {
             result.extend(extra.iter().cloned());
         }
