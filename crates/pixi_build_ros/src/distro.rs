@@ -19,7 +19,7 @@ const INDEX_URL: &str = "https://raw.githubusercontent.com/ros/rosdistro/master/
 /// up on the ROS distribution index request.
 const MAX_RETRIES: u32 = 3;
 
-const DEFAULT_MUTEX_VERSION: &str = "0.15";
+const DEFAULT_MUTEX_VERSION: &str = "0.17";
 pub const MUTEX_VERSION_ENV: &str = "GR_ROS_DISTRO_MUTEX";
 
 /// The `<major>.<minor>` distro-mutex version pinned into host and run:

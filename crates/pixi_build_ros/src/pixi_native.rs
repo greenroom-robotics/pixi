@@ -671,8 +671,8 @@ mod tests {
         .unwrap();
 
         let (build, host, run) = host_run_concrete(&recipe.recipe);
-        assert!(host.iter().any(|s| s == "ros2-distro-mutex 0.15.*"));
-        assert!(run.iter().any(|s| s == "ros2-distro-mutex 0.15.*"));
+        assert!(host.iter().any(|s| s == "ros2-distro-mutex 0.17.*"));
+        assert!(run.iter().any(|s| s == "ros2-distro-mutex 0.17.*"));
         assert!(host.iter().any(|s| s == "ros-kilted-ros-workspace"));
         assert!(run.iter().any(|s| s == "ros-kilted-ros-workspace"));
         assert!(build.iter().any(|s| s == "cmake"));
