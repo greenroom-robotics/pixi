@@ -334,7 +334,11 @@ impl GenerateRecipe for RosGenerator {
 
         // Add distro mutex to host and run
         // GR fork: pin the mutex so channel rebuilds don't drift across minor bumps.
-        let mutex_spec = format!("{} 0.15.*", distro.version.mutex_package_name());
+        let mutex_spec = format!(
+            "{} {}.*",
+            distro.version.mutex_package_name(),
+            crate::distro::ros_distro_mutex_version()
+        );
         host_items.push(Item::Value(Value::new_concrete(
             SerializableMatchSpec::from(mutex_spec.as_str()),
             None,
@@ -702,7 +706,7 @@ mod tests {
           - numpy
           - pip
           - pkg-config
-          - ros2-distro-mutex 0.15.*
+          - ros2-distro-mutex 0.17.*
         run:
           - ros-jazzy-example-interfaces
           - ros-jazzy-launch-ros
@@ -715,7 +719,7 @@ mod tests {
           - ros-jazzy-rcutils
           - ros-jazzy-rmw
           - ros-jazzy-std-msgs
-          - ros2-distro-mutex 0.15.*
+          - ros2-distro-mutex 0.17.*
         "###);
     }
 
