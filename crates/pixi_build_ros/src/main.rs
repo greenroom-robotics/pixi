@@ -35,7 +35,9 @@ use rattler_build_types::NormalizedKey;
 use rattler_conda_types::{ChannelUrl, Platform};
 
 use crate::build_script::{PythonInstall, render_build_script};
-use crate::config::{PackageMappingSource, RosMode, extract_distro_from_channels_list};
+use crate::config::{
+    PackageMappingSource, RosBuildType, RosMode, extract_distro_from_channels_list,
+};
 use crate::distro::Distro;
 use crate::metadata::parse_and_render;
 use crate::package_map::{
@@ -302,7 +304,7 @@ async fn generate_recipe_package_xml(
 
     // Generate build script
     let build_type = package_xml.build_type();
-    let python_install = PythonInstall::resolve(&build_type, editable);
+    let python_install = PythonInstall::resolve(RosBuildType::from_ros_name(&build_type), editable);
     // package-xml flow always has a real package.xml on disk; nothing to
     // synthesize. The argument is consumed only by ament_idl in pixi-native.
     let build_script_content = render_build_script(

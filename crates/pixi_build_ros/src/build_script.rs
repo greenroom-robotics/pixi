@@ -6,6 +6,8 @@ use miette::Diagnostic;
 use rattler_conda_types::Platform;
 use thiserror::Error;
 
+use crate::config::RosBuildType;
+
 /// Errors that can occur during build script generation.
 #[derive(Debug, Error, Diagnostic)]
 pub enum BuildScriptError {
@@ -27,11 +29,12 @@ pub enum PythonInstall {
 }
 
 impl PythonInstall {
-    pub fn resolve(build_type: &str, editable: bool) -> Self {
-        if editable && build_type == "ament_python" {
-            Self::Symlinked
-        } else {
-            Self::Copied
+    /// `None` covers the build types this backend does not model, none of
+    /// which install a plain Python tree into `$SP_DIR`.
+    pub fn resolve(build_type: Option<RosBuildType>, editable: bool) -> Self {
+        match (build_type, editable) {
+            (Some(RosBuildType::AmentPython), true) => Self::Symlinked,
+            _ => Self::Copied,
         }
     }
 }
@@ -103,9 +106,14 @@ mod tests {
 
     #[test]
     fn test_render_ament_cmake() {
-        let script =
-            render_build_script("ament_cmake", "humble", &PathBuf::from("/my/source"), None, PythonInstall::Copied)
-                .unwrap();
+        let script = render_build_script(
+            "ament_cmake",
+            "humble",
+            &PathBuf::from("/my/source"),
+            None,
+            PythonInstall::Copied,
+        )
+        .unwrap();
 
         assert!(script.contains("/my/source"));
         assert!(script.contains("Release"));
@@ -115,8 +123,14 @@ mod tests {
 
     #[test]
     fn test_render_ament_python() {
-        let script =
-            render_build_script("ament_python", "jazzy", &PathBuf::from("/src"), None, PythonInstall::Copied).unwrap();
+        let script = render_build_script(
+            "ament_python",
+            "jazzy",
+            &PathBuf::from("/src"),
+            None,
+            PythonInstall::Copied,
+        )
+        .unwrap();
 
         assert!(script.contains("/src"));
         assert!(!script.contains("@SRC_DIR@"));
@@ -124,7 +138,14 @@ mod tests {
 
     #[test]
     fn test_render_catkin() {
-        let script = render_build_script("catkin", "noetic", &PathBuf::from("/pkg"), None, PythonInstall::Copied).unwrap();
+        let script = render_build_script(
+            "catkin",
+            "noetic",
+            &PathBuf::from("/pkg"),
+            None,
+            PythonInstall::Copied,
+        )
+        .unwrap();
 
         assert!(script.contains("/pkg"));
         assert!(script.contains("noetic"));
@@ -132,8 +153,14 @@ mod tests {
 
     #[test]
     fn test_render_ament_cargo() {
-        let script =
-            render_build_script("ament_cargo", "kilted", &PathBuf::from("/work"), None, PythonInstall::Copied).unwrap();
+        let script = render_build_script(
+            "ament_cargo",
+            "kilted",
+            &PathBuf::from("/work"),
+            None,
+            PythonInstall::Copied,
+        )
+        .unwrap();
 
         assert!(script.contains("cargo ament-build"));
         assert!(script.contains("/work"));
@@ -145,25 +172,39 @@ mod tests {
     #[test]
     fn test_python_install_resolve() {
         assert_eq!(
-            PythonInstall::resolve("ament_python", true),
+            PythonInstall::resolve(Some(RosBuildType::AmentPython), true),
             PythonInstall::Symlinked
         );
         assert_eq!(
-            PythonInstall::resolve("ament_python", false),
+            PythonInstall::resolve(Some(RosBuildType::AmentPython), false),
             PythonInstall::Copied
         );
         assert_eq!(
-            PythonInstall::resolve("ament_cmake", true),
+            PythonInstall::resolve(Some(RosBuildType::AmentCmake), true),
             PythonInstall::Copied
+        );
+        // package.xml's catkin/cmake shapes have no RosBuildType.
+        assert_eq!(
+            PythonInstall::resolve(RosBuildType::from_ros_name("catkin"), true),
+            PythonInstall::Copied
+        );
+        assert_eq!(
+            RosBuildType::from_ros_name(RosBuildType::AmentPython.as_ros_name()),
+            Some(RosBuildType::AmentPython)
         );
     }
 
     #[test]
     fn test_symlink_install_toggle() {
         let src = PathBuf::from("/src");
-        let symlinked =
-            render_build_script("ament_python", "jazzy", &src, None, PythonInstall::Symlinked)
-                .unwrap();
+        let symlinked = render_build_script(
+            "ament_python",
+            "jazzy",
+            &src,
+            None,
+            PythonInstall::Symlinked,
+        )
+        .unwrap();
         let copied =
             render_build_script("ament_python", "jazzy", &src, None, PythonInstall::Copied)
                 .unwrap();
@@ -175,7 +216,13 @@ mod tests {
 
     #[test]
     fn test_unsupported_build_type() {
-        let result = render_build_script("unknown_type", "jazzy", &PathBuf::from("/src"), None, PythonInstall::Copied);
+        let result = render_build_script(
+            "unknown_type",
+            "jazzy",
+            &PathBuf::from("/src"),
+            None,
+            PythonInstall::Copied,
+        );
         assert!(matches!(
             result,
             Err(BuildScriptError::UnsupportedBuildType { .. })

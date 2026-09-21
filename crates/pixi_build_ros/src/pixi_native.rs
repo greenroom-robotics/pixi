@@ -293,12 +293,7 @@ pub async fn generate(
     req.run.extend(run_items);
 
     // Build script.
-    let build_type_str = match build_type {
-        RosBuildType::AmentCmake => "ament_cmake",
-        RosBuildType::AmentPython => "ament_python",
-        RosBuildType::AmentCargo => "ament_cargo",
-        RosBuildType::AmentIdl => "ament_idl",
-    };
+    let build_type_str = build_type.as_ros_name();
     // All ament_* build types need a package.xml at build time:
     // ament_package() / setup.py / cargo-ament-build all read or install it.
     // Plain cmake/catkin builds ignore this argument.
@@ -316,7 +311,7 @@ pub async fn generate(
         Err(_) => synthesize_package_xml(model, build_type),
     };
     let synth_xml = Some(xml);
-    let python_install = PythonInstall::resolve(build_type_str, editable);
+    let python_install = PythonInstall::resolve(Some(build_type), editable);
     let script_content = render_build_script(
         build_type_str,
         &distro,
@@ -764,7 +759,12 @@ mod tests {
 
         let symlinked = gen_with(true).await;
         assert!(!symlinked.build_input_globs.iter().any(|g| g == "**/*.py"));
-        assert!(symlinked.metadata_input_globs.iter().any(|g| g == "**/*.py"));
+        assert!(
+            symlinked
+                .metadata_input_globs
+                .iter()
+                .any(|g| g == "**/*.py")
+        );
         assert!(crate::globs::ROS_SOURCE_GLOBS.contains(&"setup.py"));
 
         let copied = gen_with(false).await;
