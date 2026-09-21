@@ -34,31 +34,6 @@ pub enum RosBuildType {
     AmentIdl,
 }
 
-impl RosBuildType {
-    /// The `<export><build_type>` spelling, as used in `package.xml` and to
-    /// select a build script template.
-    pub fn as_ros_name(&self) -> &'static str {
-        match self {
-            Self::AmentCmake => "ament_cmake",
-            Self::AmentPython => "ament_python",
-            Self::AmentCargo => "ament_cargo",
-            Self::AmentIdl => "ament_idl",
-        }
-    }
-
-    /// `None` for build types this backend does not model, such as the
-    /// `catkin` and `cmake` shapes only the package.xml flow accepts.
-    pub fn from_ros_name(name: &str) -> Option<Self> {
-        match name {
-            "ament_cmake" => Some(Self::AmentCmake),
-            "ament_python" => Some(Self::AmentPython),
-            "ament_cargo" => Some(Self::AmentCargo),
-            "ament_idl" => Some(Self::AmentIdl),
-            _ => None,
-        }
-    }
-}
-
 /// Configuration for the ROS build backend.
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]

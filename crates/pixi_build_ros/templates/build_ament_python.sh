@@ -43,17 +43,3 @@ if [ -f setup.cfg ] && grep -q "install[-_]scripts" setup.cfg; then
 else
     $PYTHON -m pip install . --no-deps -vvv
 fi
-
-# Point the installed modules back at the source tree so edits are live.
-# Per-file, so generated files in the prefix (parameter libraries, message
-# bindings, __pycache__) stay real files and cannot write back into the source.
-if [ "@SYMLINK_INSTALL@" = "1" ]; then
-    find "@SRC_DIR@" -name .pixi -prune -o -name .git -prune -o -name '*.py' -type f -print |
-    while read -r src; do
-        rel="${src#@SRC_DIR@/}"
-        installed="$SP_DIR/$rel"
-        if [ -f "$installed" ]; then
-            ln -sf "$src" "$installed"
-        fi
-    done
-fi
