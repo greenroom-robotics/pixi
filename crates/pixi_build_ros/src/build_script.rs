@@ -16,6 +16,32 @@ pub enum BuildScriptError {
     UnsupportedBuildType { build_type: String },
 }
 
+/// How Python modules end up in the install prefix.
+///
+/// The same value must drive both the build script and the build input globs:
+/// symlinked modules are served from the source tree, so tracking them as
+/// build inputs would rebuild on every edit and defeat the symlink, while
+/// symlinking without untracking them would leave the globs describing files
+/// the artifact no longer contains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PythonInstall {
+    Copied,
+    Symlinked,
+}
+
+impl PythonInstall {
+    /// Only `ament_python` installs into `$SP_DIR` from a plain source tree,
+    /// and only an editable build may point the prefix at sources that outlive
+    /// it.
+    pub fn resolve(build_type: &str, editable: bool) -> Self {
+        if editable && build_type == "ament_python" {
+            Self::Symlinked
+        } else {
+            Self::Copied
+        }
+    }
+}
+
 /// Render a build script from the appropriate template.
 ///
 /// Selects the template based on `build_type` and platform, then performs
@@ -29,6 +55,7 @@ pub fn render_build_script(
     distro: &str,
     source_dir: &Path,
     package_xml: Option<&str>,
+    python_install: PythonInstall,
 ) -> Result<String, BuildScriptError> {
     // Use the current (build) platform, not the host/target platform.
     // The build script runs on the build machine.
@@ -40,7 +67,14 @@ pub fn render_build_script(
         .replace("@SRC_DIR@", &src_dir_str)
         .replace("@DISTRO@", distro)
         .replace("@BUILD_DIR@", "build")
-        .replace("@BUILD_TYPE@", "Release");
+        .replace("@BUILD_TYPE@", "Release")
+        .replace(
+            "@SYMLINK_INSTALL@",
+            match python_install {
+                PythonInstall::Symlinked => "1",
+                PythonInstall::Copied => "0",
+            },
+        );
 
     if let Some(xml) = package_xml {
         rendered = rendered.replace("@PACKAGE_XML_CONTENT@", xml);
@@ -76,7 +110,7 @@ mod tests {
     #[test]
     fn test_render_ament_cmake() {
         let script =
-            render_build_script("ament_cmake", "humble", &PathBuf::from("/my/source"), None)
+            render_build_script("ament_cmake", "humble", &PathBuf::from("/my/source"), None, PythonInstall::Copied)
                 .unwrap();
 
         assert!(script.contains("/my/source"));
@@ -88,7 +122,7 @@ mod tests {
     #[test]
     fn test_render_ament_python() {
         let script =
-            render_build_script("ament_python", "jazzy", &PathBuf::from("/src"), None).unwrap();
+            render_build_script("ament_python", "jazzy", &PathBuf::from("/src"), None, PythonInstall::Copied).unwrap();
 
         assert!(script.contains("/src"));
         assert!(!script.contains("@SRC_DIR@"));
@@ -96,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_render_catkin() {
-        let script = render_build_script("catkin", "noetic", &PathBuf::from("/pkg"), None).unwrap();
+        let script = render_build_script("catkin", "noetic", &PathBuf::from("/pkg"), None, PythonInstall::Copied).unwrap();
 
         assert!(script.contains("/pkg"));
         assert!(script.contains("noetic"));
@@ -105,7 +139,7 @@ mod tests {
     #[test]
     fn test_render_ament_cargo() {
         let script =
-            render_build_script("ament_cargo", "kilted", &PathBuf::from("/work"), None).unwrap();
+            render_build_script("ament_cargo", "kilted", &PathBuf::from("/work"), None, PythonInstall::Copied).unwrap();
 
         assert!(script.contains("cargo ament-build"));
         assert!(script.contains("/work"));
@@ -115,8 +149,39 @@ mod tests {
     }
 
     #[test]
+    fn test_python_install_resolve() {
+        assert_eq!(
+            PythonInstall::resolve("ament_python", true),
+            PythonInstall::Symlinked
+        );
+        assert_eq!(
+            PythonInstall::resolve("ament_python", false),
+            PythonInstall::Copied
+        );
+        assert_eq!(
+            PythonInstall::resolve("ament_cmake", true),
+            PythonInstall::Copied
+        );
+    }
+
+    #[test]
+    fn test_symlink_install_toggle() {
+        let src = PathBuf::from("/src");
+        let symlinked =
+            render_build_script("ament_python", "jazzy", &src, None, PythonInstall::Symlinked)
+                .unwrap();
+        let copied =
+            render_build_script("ament_python", "jazzy", &src, None, PythonInstall::Copied)
+                .unwrap();
+
+        assert!(symlinked.contains(r#"if [ "1" = "1" ]"#));
+        assert!(copied.contains(r#"if [ "0" = "1" ]"#));
+        assert!(!symlinked.contains("@SYMLINK_INSTALL@"));
+    }
+
+    #[test]
     fn test_unsupported_build_type() {
-        let result = render_build_script("unknown_type", "jazzy", &PathBuf::from("/src"), None);
+        let result = render_build_script("unknown_type", "jazzy", &PathBuf::from("/src"), None, PythonInstall::Copied);
         assert!(matches!(
             result,
             Err(BuildScriptError::UnsupportedBuildType { .. })

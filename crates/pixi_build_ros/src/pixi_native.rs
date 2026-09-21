@@ -18,7 +18,7 @@ use rattler_build_recipe::stage0::{
 use rattler_conda_types::{ChannelUrl, NoArchType, Platform};
 use thiserror::Error;
 
-use crate::build_script::render_build_script;
+use crate::build_script::{PythonInstall, render_build_script};
 use crate::config::{RosBackendConfig, RosBuildType, extract_distro_from_channels_list};
 
 #[derive(Debug, Error, Diagnostic)]
@@ -143,6 +143,7 @@ pub async fn generate(
     manifest_root: PathBuf,
     _host_platform: Platform,
     channels: Vec<ChannelUrl>,
+    editable: bool,
 ) -> miette::Result<GeneratedRecipe> {
     let distro = resolve_distro(config, &channels, model)?;
 
@@ -315,11 +316,13 @@ pub async fn generate(
         Err(_) => synthesize_package_xml(model, build_type),
     };
     let synth_xml = Some(xml);
+    let python_install = PythonInstall::resolve(build_type_str, editable);
     let script_content = render_build_script(
         build_type_str,
         &distro,
         &manifest_root,
         synth_xml.as_deref(),
+        python_install,
     )
     .map_err(|e| miette::miette!("failed to render build script: {e}"))?;
 
@@ -350,12 +353,21 @@ pub async fn generate(
         generated.recipe.build.noarch = Some(Value::new_concrete(NoArchType::python(), None));
     }
 
-    for glob in crate::globs::ROS_SOURCE_GLOBS {
+    for glob in crate::globs::ROS_SOURCE_GLOBS
+        .iter()
+        .chain(crate::globs::ROS_PYTHON_SOURCE_GLOBS)
+    {
         generated.metadata_input_globs.push((*glob).to_string());
     }
     if let Some(extra) = &config.extra_input_globs {
         for g in extra {
             generated.metadata_input_globs.push(g.clone());
+        }
+    }
+
+    if python_install == PythonInstall::Copied {
+        for glob in crate::globs::ROS_PYTHON_SOURCE_GLOBS {
+            generated.build_input_globs.push((*glob).to_string());
         }
     }
 
@@ -661,6 +673,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -684,6 +697,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -719,6 +733,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -731,6 +746,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn symlinked_python_untracks_module_sources_for_the_build() {
+        let cfg = cfg_pixi_native(RosBuildType::AmentPython);
+        let model = model_with_deps(&["ros-kilted-rclpy"], &["ros-kilted-rclpy"]);
+        let gen_with = async |editable| {
+            generate(
+                &model,
+                &cfg,
+                PathBuf::from("/tmp/fake"),
+                rattler_conda_types::Platform::Linux64,
+                vec![],
+                editable,
+            )
+            .await
+            .unwrap()
+        };
+
+        let symlinked = gen_with(true).await;
+        assert!(!symlinked.build_input_globs.iter().any(|g| g == "**/*.py"));
+        // The lock must still notice a source edit even though the build won't.
+        assert!(symlinked.metadata_input_globs.iter().any(|g| g == "**/*.py"));
+        // Packaging-level changes are not served from the source tree.
+        assert!(crate::globs::ROS_SOURCE_GLOBS.contains(&"setup.py"));
+
+        let copied = gen_with(false).await;
+        assert!(copied.build_input_globs.iter().any(|g| g == "**/*.py"));
+    }
+
+    #[tokio::test]
     async fn generate_ament_python_defaults_to_noarch() {
         let cfg = cfg_pixi_native(RosBuildType::AmentPython);
         let model = model_with_deps(&["ros-kilted-rclpy"], &["ros-kilted-rclpy"]);
@@ -740,6 +783,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -784,6 +828,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -814,6 +859,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -840,6 +886,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -864,6 +911,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -890,6 +938,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -914,6 +963,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
@@ -942,6 +992,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await;
         let err = match result {
@@ -969,6 +1020,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         {
@@ -991,6 +1043,7 @@ mod tests {
             PathBuf::from("/tmp/fake"),
             rattler_conda_types::Platform::Linux64,
             vec![],
+            false,
         )
         .await
         .unwrap();
