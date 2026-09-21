@@ -764,9 +764,7 @@ mod tests {
 
         let symlinked = gen_with(true).await;
         assert!(!symlinked.build_input_globs.iter().any(|g| g == "**/*.py"));
-        // The lock must still notice a source edit even though the build won't.
         assert!(symlinked.metadata_input_globs.iter().any(|g| g == "**/*.py"));
-        // Packaging-level changes are not served from the source tree.
         assert!(crate::globs::ROS_SOURCE_GLOBS.contains(&"setup.py"));
 
         let copied = gen_with(false).await;

@@ -1,12 +1,9 @@
-//! Shared input-glob lists. Both the package.xml and pixi-native code paths
-//! reference them so changes to "what counts as a source change" stay in
-//! lockstep.
+//! Shared input-glob lists: what counts as a source change for a ROS package.
 
 /// Globs that always invalidate the build cache for any ROS package.
 ///
-/// `setup.py` is listed explicitly rather than left to
-/// [`ROS_PYTHON_SOURCE_GLOBS`]: entry points and `data_files` are baked in at
-/// install time, so it must force a rebuild even when module sources don't.
+/// `setup.py` bakes entry points and `data_files` in at install time, so it
+/// forces a rebuild even when module sources don't.
 pub(crate) const ROS_SOURCE_GLOBS: &[&str] = &[
     "**/*.c",
     "**/*.cpp",
@@ -31,9 +28,8 @@ pub(crate) const ROS_SOURCE_GLOBS: &[&str] = &[
     "action/**/*.action",
 ];
 
-/// Python module sources, tracked separately because a
-/// [`PythonInstall::Symlinked`] build serves them straight from the source
-/// tree and so must not rebuild when they change.
+/// Python module sources, tracked separately: a [`PythonInstall::Symlinked`]
+/// build serves them from the source tree, so they must not trigger a rebuild.
 ///
 /// [`PythonInstall::Symlinked`]: crate::build_script::PythonInstall::Symlinked
 pub(crate) const ROS_PYTHON_SOURCE_GLOBS: &[&str] = &["**/*.py", "**/*.pyx"];

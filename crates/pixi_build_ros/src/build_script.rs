@@ -18,11 +18,8 @@ pub enum BuildScriptError {
 
 /// How Python modules end up in the install prefix.
 ///
-/// The same value must drive both the build script and the build input globs:
-/// symlinked modules are served from the source tree, so tracking them as
-/// build inputs would rebuild on every edit and defeat the symlink, while
-/// symlinking without untracking them would leave the globs describing files
-/// the artifact no longer contains.
+/// Symlinked modules are served from the source tree, so the same value drives
+/// the build script and the build input globs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PythonInstall {
     Copied,
@@ -30,9 +27,6 @@ pub enum PythonInstall {
 }
 
 impl PythonInstall {
-    /// Only `ament_python` installs into `$SP_DIR` from a plain source tree,
-    /// and only an editable build may point the prefix at sources that outlive
-    /// it.
     pub fn resolve(build_type: &str, editable: bool) -> Self {
         if editable && build_type == "ament_python" {
             Self::Symlinked
