@@ -22,18 +22,17 @@ pub enum BuildScriptError {
 ///
 /// Symlinked modules are served from the source tree, so the same value drives
 /// the build script and the build input globs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PythonInstall {
+    #[default]
     Copied,
     Symlinked,
 }
 
 impl PythonInstall {
-    /// `None` covers the build types this backend does not model, none of
-    /// which install a plain Python tree into `$SP_DIR`.
-    pub fn resolve(build_type: Option<RosBuildType>, editable: bool) -> Self {
+    pub fn resolve(build_type: RosBuildType, editable: bool) -> Self {
         match (build_type, editable) {
-            (Some(RosBuildType::AmentPython), true) => Self::Symlinked,
+            (RosBuildType::AmentPython, true) => Self::Symlinked,
             _ => Self::Copied,
         }
     }
@@ -172,22 +171,20 @@ mod tests {
     #[test]
     fn test_python_install_resolve() {
         assert_eq!(
-            PythonInstall::resolve(Some(RosBuildType::AmentPython), true),
+            PythonInstall::resolve(RosBuildType::AmentPython, true),
             PythonInstall::Symlinked
         );
         assert_eq!(
-            PythonInstall::resolve(Some(RosBuildType::AmentPython), false),
+            PythonInstall::resolve(RosBuildType::AmentPython, false),
             PythonInstall::Copied
         );
         assert_eq!(
-            PythonInstall::resolve(Some(RosBuildType::AmentCmake), true),
+            PythonInstall::resolve(RosBuildType::AmentCmake, true),
             PythonInstall::Copied
         );
         // package.xml's catkin/cmake shapes have no RosBuildType.
-        assert_eq!(
-            PythonInstall::resolve(RosBuildType::from_ros_name("catkin"), true),
-            PythonInstall::Copied
-        );
+        assert!(RosBuildType::from_ros_name("catkin").is_none());
+        assert_eq!(PythonInstall::default(), PythonInstall::Copied);
         assert_eq!(
             RosBuildType::from_ros_name(RosBuildType::AmentPython.as_ros_name()),
             Some(RosBuildType::AmentPython)

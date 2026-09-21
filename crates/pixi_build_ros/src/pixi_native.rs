@@ -311,7 +311,7 @@ pub async fn generate(
         Err(_) => synthesize_package_xml(model, build_type),
     };
     let synth_xml = Some(xml);
-    let python_install = PythonInstall::resolve(Some(build_type), editable);
+    let python_install = PythonInstall::resolve(build_type, editable);
     let script_content = render_build_script(
         build_type_str,
         &distro,

@@ -304,7 +304,10 @@ async fn generate_recipe_package_xml(
 
     // Generate build script
     let build_type = package_xml.build_type();
-    let python_install = PythonInstall::resolve(RosBuildType::from_ros_name(&build_type), editable);
+    // catkin/cmake packages have no RosBuildType and never symlink.
+    let python_install = RosBuildType::from_ros_name(&build_type)
+        .map(|bt| PythonInstall::resolve(bt, editable))
+        .unwrap_or_default();
     // package-xml flow always has a real package.xml on disk; nothing to
     // synthesize. The argument is consumed only by ament_idl in pixi-native.
     let build_script_content = render_build_script(
