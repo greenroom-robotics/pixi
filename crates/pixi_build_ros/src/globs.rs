@@ -1,12 +1,9 @@
-//! Shared input-glob list. Both the package.xml and pixi-native code paths
-//! reference it so changes to "what counts as a source change" stay in
-//! lockstep.
+//! Shared input-glob lists: what counts as a source change for a ROS package.
 
-/// Globs that should always invalidate the build cache for any ROS package.
+/// Globs that always invalidate the build cache for any ROS package.
 ///
-/// Python sources are included unconditionally: every `ament_*` template
-/// copies them into the built package, so a `.py` edit changes the artifact
-/// even when the frontend asked for an editable build.
+/// `setup.py` bakes entry points and `data_files` in at install time, so it
+/// forces a rebuild even when module sources don't.
 pub(crate) const ROS_SOURCE_GLOBS: &[&str] = &[
     "**/*.c",
     "**/*.cpp",
@@ -14,9 +11,8 @@ pub(crate) const ROS_SOURCE_GLOBS: &[&str] = &[
     "**/*.hpp",
     "**/*.rs",
     "**/*.sh",
-    "**/*.py",
-    "**/*.pyx",
     "package.xml",
+    "setup.py",
     "setup.cfg",
     "pyproject.toml",
     "Makefile",
@@ -31,3 +27,9 @@ pub(crate) const ROS_SOURCE_GLOBS: &[&str] = &[
     "srv/**/*.srv",
     "action/**/*.action",
 ];
+
+/// Python module sources, tracked separately: a [`PythonInstall::Symlinked`]
+/// build serves them from the source tree, so they must not trigger a rebuild.
+///
+/// [`PythonInstall::Symlinked`]: crate::build_script::PythonInstall::Symlinked
+pub(crate) const ROS_PYTHON_SOURCE_GLOBS: &[&str] = &["**/*.py", "**/*.pyx"];

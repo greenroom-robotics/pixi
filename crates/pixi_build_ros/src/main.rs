@@ -34,8 +34,10 @@ use rattler_build_recipe::stage0::{Item, Script, SerializableMatchSpec, Value};
 use rattler_build_types::NormalizedKey;
 use rattler_conda_types::{ChannelUrl, Platform};
 
-use crate::build_script::render_build_script;
-use crate::config::{PackageMappingSource, RosMode, extract_distro_from_channels_list};
+use crate::build_script::{PythonInstall, render_build_script};
+use crate::config::{
+    PackageMappingSource, RosBuildType, RosMode, extract_distro_from_channels_list,
+};
 use crate::distro::Distro;
 use crate::metadata::parse_and_render;
 use crate::package_map::{
@@ -68,6 +70,7 @@ async fn generate_recipe_package_xml(
     workspace_scratch_directory: Option<PathBuf>,
     workspace_directory: Option<PathBuf>,
     checkout_root: Option<PathBuf>,
+    editable: bool,
 ) -> miette::Result<GeneratedRecipe> {
     // Resolve distro from config or channels
     let distro_name = config
@@ -301,10 +304,19 @@ async fn generate_recipe_package_xml(
 
     // Generate build script
     let build_type = package_xml.build_type();
+    // catkin/cmake packages have no RosBuildType and never symlink.
+    let python_install = RosBuildType::from_ros_name(&build_type)
+        .map(|bt| PythonInstall::resolve(bt, editable))
+        .unwrap_or_default();
     // package-xml flow always has a real package.xml on disk; nothing to
     // synthesize. The argument is consumed only by ament_idl in pixi-native.
-    let build_script_content =
-        render_build_script(&build_type, &distro_name, &manifest_root, None)?;
+    let build_script_content = render_build_script(
+        &build_type,
+        &distro_name,
+        &manifest_root,
+        None,
+        python_install,
+    )?;
 
     let mut script_env: indexmap::IndexMap<String, Value<String>> = indexmap::IndexMap::new();
     script_env.insert(
@@ -327,6 +339,12 @@ async fn generate_recipe_package_xml(
 
     if let Some(n) = config.build_number {
         generated_recipe.recipe.build.number = Some(Value::new_concrete(n, None));
+    }
+
+    if python_install == PythonInstall::Copied {
+        for glob in globs::ROS_PYTHON_SOURCE_GLOBS {
+            generated_recipe.build_input_globs.push((*glob).to_string());
+        }
     }
 
     Ok(generated_recipe)
@@ -353,7 +371,7 @@ impl GenerateRecipe for RosGenerator {
         config: &Self::Config,
         manifest_path: PathBuf,
         host_platform: Platform,
-        _python_params: Option<PythonParams>,
+        python_params: Option<PythonParams>,
         _variants: &HashSet<NormalizedKey>,
         channels: Vec<ChannelUrl>,
         _cache_dir: Option<PathBuf>,
@@ -375,9 +393,19 @@ impl GenerateRecipe for RosGenerator {
             manifest_path.clone()
         };
 
+        let editable = python_params.unwrap_or_default().editable;
+
         match resolve_mode(config, &manifest_root) {
             RosMode::PixiNative => {
-                pixi_native::generate(model, config, manifest_root, host_platform, channels).await
+                pixi_native::generate(
+                    model,
+                    config,
+                    manifest_root,
+                    host_platform,
+                    channels,
+                    editable,
+                )
+                .await
             }
             RosMode::PackageXml => {
                 generate_recipe_package_xml(
@@ -389,6 +417,7 @@ impl GenerateRecipe for RosGenerator {
                     workspace_scratch_directory,
                     workspace_directory,
                     checkout_root,
+                    editable,
                 )
                 .await
             }
