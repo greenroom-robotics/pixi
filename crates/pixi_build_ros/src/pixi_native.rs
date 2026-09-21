@@ -427,7 +427,7 @@ pub async fn generate(
     // the source carries no package.xml.
     let package_xml_path = manifest_root.join("package.xml");
     let xml = match std::fs::read_to_string(&package_xml_path) {
-        Ok(content) => content,
+        Ok(content) => override_package_xml_version(&content, model),
         Err(_) => synthesize_package_xml(model, build_type),
     };
     let script_content = render_native_build_script(build_type, &distro, &manifest_root, &xml)
@@ -580,6 +580,31 @@ fn synthesize_package_xml(model: &ProjectModel, build_type: RosBuildType) -> Str
         email = xml_escape(&maintainer_email),
         maintainer = xml_escape(&maintainer_name),
     )
+}
+
+/// Rewrite `<version>` in a source `package.xml` to the version from the pixi
+/// manifest.
+///
+/// The manifest is the single source of truth for the package version, but
+/// everything that reads `package.xml` at build time — `${PROJECT_NAME}_VERSION`
+/// in CMake, the generated `<pkg>Config-version.cmake`, the Rust crate emitted
+/// by `rosidl_generator_rs` — would otherwise report whatever stale value the
+/// checked-in file carries. Only the version element is touched; `<depend>`
+/// declarations and the rest of the file are preserved verbatim.
+///
+/// A model without a version, or a file with no `<version>` element, is
+/// returned unchanged.
+fn override_package_xml_version(xml: &str, model: &ProjectModel) -> String {
+    let Some(version) = model.version.as_ref().map(|v| v.to_string()) else {
+        return xml.to_string();
+    };
+    let re = regex::Regex::new(r"(?s)<version(\s[^>]*)?>.*?</version>")
+        .expect("valid version element regex");
+    re.replace(
+        xml,
+        format!("<version${{1}}>{}</version>", xml_escape(&version)),
+    )
+    .into_owned()
 }
 
 /// Parse `"Name <email@example.com>"` into `(name, email)`. Falls back to the
@@ -749,6 +774,37 @@ mod tests {
             }
         }))
         .expect("ProjectModel fixture")
+    }
+
+    #[test]
+    fn package_xml_version_comes_from_the_model() {
+        let model = model_with_deps(&[], &[]);
+        let xml = r#"<package format="3">
+  <name>test_pkg</name>
+  <version>1.0.1</version>
+  <depend>std_msgs</depend>
+</package>
+"#;
+        let got = override_package_xml_version(xml, &model);
+        assert!(got.contains("<version>0.1.0</version>"));
+        assert!(!got.contains("1.0.1"));
+        assert!(got.contains("<depend>std_msgs</depend>"));
+    }
+
+    #[test]
+    fn package_xml_version_keeps_attributes_and_tolerates_absence() {
+        let model = model_with_deps(&[], &[]);
+        let attrs = override_package_xml_version(
+            r#"<version compatibility="package_format">1.0.1</version>"#,
+            &model,
+        );
+        assert_eq!(
+            attrs,
+            r#"<version compatibility="package_format">0.1.0</version>"#
+        );
+
+        let no_version = "<package><name>test_pkg</name></package>";
+        assert_eq!(override_package_xml_version(no_version, &model), no_version);
     }
 
     #[test]
