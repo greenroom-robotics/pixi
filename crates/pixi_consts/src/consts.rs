@@ -121,10 +121,12 @@ pub const ONE_TIME_MESSAGES_DIR: &str = "one-time-messages";
 pub const ENVIRONMENT_FILE_NAME: &str = "pixi";
 
 // Note: no trailing slash!
-pub const RELEASES_URL: &str = "https://github.com/prefix-dev/pixi/releases";
-pub const RELEASES_API_BY_TAG: &str = "https://api.github.com/repos/prefix-dev/pixi/releases/tags";
+pub const RELEASES_URL: &str = "https://github.com/greenroom-robotics/pixi/releases";
+pub const RELEASES_API_BY_TAG: &str =
+    "https://api.github.com/repos/greenroom-robotics/pixi/releases/tags";
 pub const RELEASES_API_LATEST: &str =
-    "https://api.github.com/repos/prefix-dev/pixi/releases/latest";
+    "https://api.github.com/repos/greenroom-robotics/pixi/releases/latest";
+pub const RELEASE_TAG_PREFIX: &str = "pixi-gr@";
 
 pub const CLAP_CONFIG_OPTIONS: &str = "Config Options";
 pub const CLAP_GIT_OPTIONS: &str = "Git Options";

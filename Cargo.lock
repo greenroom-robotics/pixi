@@ -6467,7 +6467,6 @@ dependencies = [
  "strsim",
  "strum",
  "tabwriter",
- "tar",
  "temp-env",
  "tempfile",
  "thiserror 2.0.20",
@@ -6483,7 +6482,6 @@ dependencies = [
  "uv-pypi-types",
  "uv-requirements-txt",
  "which",
- "zip",
 ]
 
 [[package]]

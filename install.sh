@@ -5,7 +5,7 @@
 set -eu
 
 VERSION="${PIXI_GR_VERSION:-0.80.0}"
-DEST="${PIXI_GR_BIN_DIR:-$HOME/.local/bin}"
+DEST="${PIXI_GR_BIN_DIR:-${PIXI_HOME:-$HOME/.pixi}/bin}"
 
 case "$(uname -m)" in
   x86_64 | amd64) arch=linux-64 ;;
