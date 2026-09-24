@@ -1,16 +1,15 @@
 name: GR Release
 
-# Cuts a `pixi-gr@<version>` fork release. The version comes from
-# crates/pixi/Cargo.toml, so this only has anything new to publish after an
-# upstream merge bumps it — hence dispatch-only rather than on push.
+# Cuts a `pixi-gr@<version>` fork release, bumped from the conventional commits
+# since the last `pixi-gr@` tag unless a version is given.
 
 on:
   workflow_dispatch:
     inputs:
-      publish:
-        description: Publish as a full release instead of a prerelease.
-        type: boolean
-        default: false
+      version:
+        description: Release this X.Y.Z instead of bumping from commits (e.g. to sync with upstream).
+        type: string
+        required: false
 
 permissions:
   contents: write
@@ -37,7 +36,7 @@ jobs:
 
       - uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c # v2
         with:
-          tool: cargo-zigbuild@0.23.4
+          tool: cargo-zigbuild@0.23.4,git-cliff@2.14.2
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -53,6 +52,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Cut release
-        run: python3 scripts/release_gr.py ${{ inputs.publish && '--publish' || '' }}
+        run: python3 scripts/release_gr.py ${VERSION:+--version "$VERSION"}
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
