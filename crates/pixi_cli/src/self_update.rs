@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 use std::io::{Seek, Write};
 
 use flate2::read::GzDecoder;
-use tar::Archive;
 
 use miette::IntoDiagnostic;
 use pixi_config::Config;
@@ -10,7 +9,7 @@ use pixi_consts::consts;
 use pixi_utils::reqwest::{build_reqwest_clients, reqwest_client_builder};
 use reqwest::redirect::Policy;
 
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::NamedTempFile;
 use url::Url;
 
 use rattler_conda_types::Version;
@@ -78,31 +77,13 @@ fn user_agent() -> String {
     format!("pixi {}", consts::PIXI_VERSION)
 }
 
-fn default_archive_name() -> Option<String> {
-    if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "x86_64") {
-            Some("pixi-x86_64-apple-darwin.tar.gz".to_string())
-        } else {
-            Some("pixi-aarch64-apple-darwin.tar.gz".to_string())
-        }
-    } else if cfg!(target_os = "windows") {
-        if cfg!(target_arch = "x86_64") {
-            Some("pixi-x86_64-pc-windows-msvc.zip".to_string())
-        } else if cfg!(target_arch = "aarch64") {
-            Some("pixi-aarch64-pc-windows-msvc.zip".to_string())
-        } else {
-            None
-        }
-    } else if cfg!(target_os = "linux") {
-        if cfg!(target_arch = "x86_64") {
-            Some("pixi-x86_64-unknown-linux-musl.tar.gz".to_string())
-        } else if cfg!(target_arch = "aarch64") {
-            Some("pixi-aarch64-unknown-linux-musl.tar.gz".to_string())
-        } else {
-            None
-        }
-    } else {
-        None
+fn release_asset_name() -> miette::Result<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Ok("pixi-linux-64.gz"),
+        ("linux", "aarch64") => Ok("pixi-linux-aarch64.gz"),
+        (os, arch) => miette::bail!(
+            "`pixi self-update` is unsupported on {os}-{arch}: pixi-gr only publishes linux x86_64 and aarch64 builds."
+        ),
     }
 }
 
@@ -155,18 +136,27 @@ async fn latest_version() -> miette::Result<Version> {
         Err(err) => miette::bail!("URL: {}. Request failed: {}", url, err),
     };
     if version == "releases" {
-        // /latest redirect took us back to /releases instead of /vX.Y.Z
+        // /latest redirect took us back to /releases instead of /<tag>
         miette::bail!("URL '{}' does not seem to contain any releases.", url)
-    } else if !version.starts_with("v") {
-        miette::bail!("Tag name '{}' must start with v.", version)
-    } else {
-        Ok(Version::from_str(&version[1..]).into_diagnostic()?)
+    }
+    match version.strip_prefix(consts::RELEASE_TAG_PREFIX) {
+        Some(version) => Ok(Version::from_str(version).into_diagnostic()?),
+        None => miette::bail!(
+            "Tag name '{}' must start with {}.",
+            version,
+            consts::RELEASE_TAG_PREFIX
+        ),
     }
 }
 
 async fn fetch_release_notes(version: &Option<Version>) -> miette::Result<String> {
     let url = if let Some(version) = version {
-        format!("{}/v{}", consts::RELEASES_API_BY_TAG, version)
+        format!(
+            "{}/{}{}",
+            consts::RELEASES_API_BY_TAG,
+            consts::RELEASE_TAG_PREFIX,
+            version
+        )
     } else {
         consts::RELEASES_API_LATEST.to_string()
     };
@@ -220,6 +210,8 @@ pub async fn execute(args: Args, global_options: &GlobalOptions) -> miette::Resu
         }
         .into());
     }
+
+    let asset_name = release_asset_name()?;
 
     // Exam the validity of provided url
     if let Some(ref url) = args.from_url
@@ -278,7 +270,12 @@ pub async fn execute(args: Args, global_options: &GlobalOptions) -> miette::Resu
             Err(err) => {
                 // Failure to fetch release notes must not prevent self-update, especially if format changes
                 let release_url = if let Some(ref target_version) = target_version {
-                    format!("{}/v{}", consts::RELEASES_URL, target_version)
+                    format!(
+                        "{}/tag/{}{}",
+                        consts::RELEASES_URL,
+                        consts::RELEASE_TAG_PREFIX,
+                        target_version
+                    )
                 } else {
                     format!("{}/latest", consts::RELEASES_URL)
                 };
@@ -353,10 +350,6 @@ pub async fn execute(args: Args, global_options: &GlobalOptions) -> miette::Resu
         );
     }
 
-    // Get the name of the binary to download and install based on the current platform
-    let archive_name = default_archive_name()
-        .expect("Could not find the default archive name for the current platform");
-
     let pre_fix = if let Some(ref from_url) = args.from_url {
         from_url
     } else {
@@ -364,9 +357,15 @@ pub async fn execute(args: Args, global_options: &GlobalOptions) -> miette::Resu
     };
 
     let download_url = if let Some(ref target_version) = target_version {
-        format!("{}/download/v{}/{}", pre_fix, target_version, archive_name)
+        format!(
+            "{}/download/{}{}/{}",
+            pre_fix,
+            consts::RELEASE_TAG_PREFIX,
+            target_version,
+            asset_name
+        )
     } else {
-        format!("{}/latest/download/{}", pre_fix, archive_name)
+        format!("{}/latest/download/{}", pre_fix, asset_name)
     };
 
     // Create a temp file to download the archive
@@ -404,19 +403,8 @@ pub async fn execute(args: Args, global_options: &GlobalOptions) -> miette::Resu
         .rewind()
         .expect("Failed to rewind the archive file");
 
-    // Create a temporary directory to unpack the archive
-    let binary_tempdir = &tempfile::tempdir().into_diagnostic()?;
-
-    // Uncompress the archive
-    if archive_name.ends_with(".tar.gz") {
-        unpack_tar_gz(&archived_tempfile, binary_tempdir)?;
-    } else if archive_name.ends_with(".zip") {
-        let mut archive = zip::ZipArchive::new(archived_tempfile.as_file()).into_diagnostic()?;
-        archive.extract(binary_tempdir).into_diagnostic()?;
-    } else {
-        let error_message = format!("Unsupported archive format: {archive_name}");
-        Err(miette::miette!(error_message))?
-    }
+    let new_binary = NamedTempFile::new().into_diagnostic()?;
+    gunzip(archived_tempfile.as_file(), new_binary.as_file())?;
 
     if !is_quiet {
         eprintln!(
@@ -425,11 +413,7 @@ pub async fn execute(args: Args, global_options: &GlobalOptions) -> miette::Resu
         );
     }
 
-    // Get the new binary path used for self-replacement
-    let new_binary_path = binary_tempdir.path().join(pixi_binary_name());
-
-    // Replace the current binary with the new binary
-    self_replace::self_replace(new_binary_path).into_diagnostic()?;
+    self_replace::self_replace(new_binary.path()).into_diagnostic()?;
 
     if !is_quiet {
         if let Some(ref target_version) = target_version {
@@ -471,36 +455,9 @@ fn get_dry_run_message(current: &Version, target: &Version) -> String {
     }
 }
 
-/// Unpack files from a tar.gz archive to a target directory.
-fn unpack_tar_gz(
-    archived_tempfile: &NamedTempFile,
-    binary_tempdir: &TempDir,
-) -> miette::Result<()> {
-    let mut archive = Archive::new(GzDecoder::new(archived_tempfile.as_file()));
-
-    for entry in archive.entries().into_diagnostic()? {
-        let mut entry = entry.into_diagnostic()?;
-        let path = entry.path().into_diagnostic()?;
-
-        // Skip directories; we only care about files.
-        if entry.header().entry_type().is_file() {
-            // Create a flat path by stripping any directory components.
-            let stripped_path = path
-                .file_name()
-                .ok_or_else(|| miette::miette!("Failed to extract file name from {:?}", path))?;
-
-            // Construct the final path in the target directory.
-            let final_path = binary_tempdir.path().join(stripped_path);
-
-            // Unpack the file to the destination.
-            entry.unpack(final_path).into_diagnostic()?;
-        }
-    }
+fn gunzip(src: &std::fs::File, mut dst: &std::fs::File) -> miette::Result<()> {
+    std::io::copy(&mut GzDecoder::new(src), &mut dst).into_diagnostic()?;
     Ok(())
-}
-
-fn pixi_binary_name() -> String {
-    format!("pixi{}", std::env::consts::EXE_SUFFIX)
 }
 
 pub async fn execute_stub(_: Args, _: &GlobalOptions) -> miette::Result<()> {
@@ -512,53 +469,24 @@ pub async fn execute_stub(_: Args, _: &GlobalOptions) -> miette::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::io::{Read, Seek, Write};
+
+    use flate2::{Compression, write::GzEncoder};
 
     #[test]
-    pub fn test_unarchive_flat_structure() {
-        // This archive contains a single file named "a_file"
-        // So we expect the file to be extracted to the target directory
+    pub fn test_gunzip_round_trip() {
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(b"pixi binary").unwrap();
+        let mut src = tempfile::tempfile().unwrap();
+        src.write_all(&gz.finish().unwrap()).unwrap();
+        src.rewind().unwrap();
 
-        let archive_path = PathBuf::from(env!("CARGO_WORKSPACE_DIR"))
-            .join("tests")
-            .join("data")
-            .join("archives")
-            .join("pixi_flat_archive.tar.gz");
+        let mut dst = tempfile::tempfile().unwrap();
+        super::gunzip(&src, &dst).unwrap();
 
-        let named_tempfile = tempfile::NamedTempFile::new().unwrap();
-        let binary_tempdir = tempfile::tempdir().unwrap();
-
-        fs_err::copy(archive_path, named_tempfile.path()).unwrap();
-
-        super::unpack_tar_gz(&named_tempfile, &binary_tempdir).unwrap();
-
-        let binary_path = binary_tempdir.path().join("a_file");
-        assert!(binary_path.exists());
-    }
-
-    #[test]
-    pub fn test_unarchive_nested_structure() {
-        // This archive contains following nested structure
-        // pixi_nested_archive.tar.gz
-        // ├── some_pixi (directory)
-        // │   └── some_pixi (file)
-        // So we want to test that we can extract only the file to the target directory
-        // without parent directory
-        let archive_path = PathBuf::from(env!("CARGO_WORKSPACE_DIR"))
-            .join("tests")
-            .join("data")
-            .join("archives")
-            .join("pixi_nested_archive.tar.gz");
-
-        let named_tempfile = tempfile::NamedTempFile::new().unwrap();
-        let binary_tempdir = tempfile::tempdir().unwrap();
-
-        fs_err::copy(archive_path, named_tempfile.path()).unwrap();
-
-        super::unpack_tar_gz(&named_tempfile, &binary_tempdir).unwrap();
-
-        let binary_path = binary_tempdir.path().join("some_pixi");
-        assert!(binary_path.exists());
-        assert!(binary_path.is_file());
+        let mut out = Vec::new();
+        dst.rewind().unwrap();
+        dst.read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"pixi binary");
     }
 }
