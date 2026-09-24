@@ -6,19 +6,16 @@ this fork: we don't publish every target, don't sign, and tag as
 upstream's. This script is the whole GR release process.
 
 Steps:
-    1. Read the version from crates/pixi/Cargo.toml.
+    1. Take the version from --version, or bump the latest `pixi-gr@` tag from
+       the conventional commits since it with git-cliff.
     2. Cross-build `pixi` for linux-64 and linux-aarch64 with cargo-zigbuild.
     3. gzip each binary to staging/pixi-<arch>.gz.
     4. Rewrite the default VERSION in install.sh to match, and commit if it moved.
     5. Tag `pixi-gr@<version>` at HEAD and push.
     6. Create the GitHub release with install.sh + both binaries.
 
-Releases are created as prereleases by default so `setup-pixi-gr` and existing
-install.sh pins keep pointing at the last known-good build until you promote
-with `gh release edit pixi-gr@X.Y.Z --prerelease=false`.
-
 Usage:
-    pixi run -e release release-gr [--dry-run] [--publish]
+    pixi run -e release release-gr [--dry-run] [--version X.Y.Z]
 """
 
 import argparse
@@ -28,7 +25,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,9 +51,28 @@ def capture(cmd: list[str]) -> str:
     return subprocess.run(cmd, check=True, text=True, capture_output=True).stdout.strip()
 
 
-def read_version() -> str:
-    with (ROOT / "crates" / "pixi" / "Cargo.toml").open("rb") as f:
-        return tomllib.load(f)["package"]["version"]
+def bumped_version() -> str:
+    # On 0.x, feat and breaking commits bump patch rather than minor so the fork
+    # never claims an upstream version number it didn't ship.
+    env = {
+        **os.environ,
+        "GIT_CLIFF__BUMP__FEATURES_ALWAYS_BUMP_MINOR": "false",
+        "GIT_CLIFF__BUMP__BREAKING_ALWAYS_BUMP_MAJOR": "false",
+    }
+    tag = subprocess.run(
+        ["git-cliff", "--offline", "--bumped-version", "--tag-pattern", "^pixi-gr@"],
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    ).stdout.strip()
+    return tag.removeprefix("pixi-gr@")
+
+
+def semver(value: str) -> str:
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value):
+        raise argparse.ArgumentTypeError(f"{value!r} is not X.Y.Z")
+    return value
 
 
 def build(target: str, version: str, dry_run: bool) -> Path:
@@ -117,13 +132,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Cut a pixi-gr release")
     parser.add_argument("--dry-run", action="store_true", help="Build nothing, tag nothing, publish nothing")
     parser.add_argument(
-        "--publish",
-        action="store_true",
-        help="Publish as a full release instead of a prerelease",
+        "--version",
+        type=semver,
+        help="Release this version instead of bumping from commits, e.g. to sync with upstream",
     )
     args = parser.parse_args()
 
-    version = read_version()
+    version = args.version or bumped_version()
     tag = f"pixi-gr@{version}"
     print(f"Releasing {tag}")
 
@@ -143,7 +158,7 @@ def main() -> None:
     )
     head = capture(["git", "rev-parse", "HEAD"])
     if existing.returncode == 0 and existing.stdout.strip() != head:
-        sys.exit(f"error: {tag} already exists and points elsewhere")
+        sys.exit(f"error: {tag} already exists at another commit (nothing to release since it?)")
     if existing.returncode != 0:
         run(["git", "tag", tag], args.dry_run)
     run(["git", "push", "origin", "HEAD", tag], args.dry_run)
@@ -159,14 +174,12 @@ def main() -> None:
             "--repo", REPO,
             "--title", tag,
             "--notes", notes,
-            *([] if args.publish else ["--prerelease"]),
+            "--latest",
             *[str(a) for a in assets],
         ],
         args.dry_run,
     )
     print(f"\nDone: https://github.com/{REPO}/releases/tag/{tag}")
-    if not args.publish:
-        print(f"Promote with: gh release edit '{tag}' --repo {REPO} --prerelease=false --latest")
 
 
 if __name__ == "__main__":
