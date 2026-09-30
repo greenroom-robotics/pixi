@@ -387,7 +387,7 @@ impl Workspace {
             &derived.lock_file,
             &resolver,
         )
-        .await;
+        .await?;
         if outdated.is_empty() && !(needs_format_upgrade && options.upgrade_lock_file_format) {
             if needs_format_upgrade {
                 tracing::warn!(
@@ -2021,7 +2021,7 @@ impl<'p> UpdateContextBuilder<'p> {
                     &input.lock_file,
                     &resolver,
                 )
-                .await
+                .await?
             }
         };
         let lock_file = input.lock_file;

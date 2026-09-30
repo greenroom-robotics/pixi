@@ -33,8 +33,8 @@ use thiserror::Error;
 use tracing_test::traced_test;
 
 use super::{
-    EnvironmentUnsat, PlatformUnsat, SolveGroupUnsat, VerifySatisfiabilityContext, pypi_metadata,
-    verify_environment_satisfiability, verify_platform_satisfiability,
+    EnvironmentUnsat, PlatformUnsat, SolveGroupUnsat, VerifyError, VerifySatisfiabilityContext,
+    pypi_metadata, verify_environment_satisfiability, verify_platform_satisfiability,
     verify_solve_group_satisfiability,
 };
 use crate::{
@@ -56,7 +56,7 @@ enum LockfileUnsat {
     #[error(
         "environment '{0}' does not satisfy the requirements of the project for platform '{1}'"
     )]
-    PlatformUnsat(String, PixiPlatformName, #[source] PlatformUnsat),
+    PlatformUnsat(String, PixiPlatformName, #[source] VerifyError),
 
     #[error(
         "solve group '{0}' does not satisfy the requirements of the project for platform '{1}'"
@@ -156,7 +156,7 @@ async fn verify_lock_file_satisfiability(
                 .await
                 .map_err(|e| match e {
                     CommandDispatcherError::Failed(e) => {
-                        LockfileUnsat::PlatformUnsat(env.name().to_string(), platform.clone(), *e)
+                        LockfileUnsat::PlatformUnsat(env.name().to_string(), platform.clone(), e)
                     }
                     CommandDispatcherError::Cancelled => {
                         panic!("operation was cancelled which should never happen here")
@@ -187,7 +187,7 @@ async fn verify_lock_file_satisfiability(
                     PlatformUnsat::CondaPackageShouldBePypi { name }
                 }
             })
-            .map_err(|e| LockfileUnsat::PlatformUnsat(env_name.to_string(), platform, e))?;
+            .map_err(|e| LockfileUnsat::PlatformUnsat(env_name.to_string(), platform, e.into()))?;
     }
 
     Ok(())

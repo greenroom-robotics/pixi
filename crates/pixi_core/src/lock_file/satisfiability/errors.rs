@@ -7,7 +7,9 @@ use std::{
 use itertools::Itertools;
 use miette::Diagnostic;
 use pep440_rs::VersionSpecifiers;
-use pixi_command_dispatcher::{DevSourceMetadataError, SourceCheckoutError, SourceRecordError};
+use pixi_command_dispatcher::{
+    BuildBackendMetadataError, DevSourceMetadataError, SourceCheckoutError,
+};
 use pixi_manifest::{PixiPlatformName, pypi::pypi_options::PrereleaseMode};
 use pixi_record::{ParseLockFileError, SourceMismatchError};
 use pixi_uv_conversions::AsPep508Error;
@@ -568,10 +570,6 @@ pub enum PlatformUnsat {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
-    BackendDiscovery(#[from] pixi_build_discovery::DiscoveryError),
-
-    #[error(transparent)]
-    #[diagnostic(transparent)]
     Variants(#[from] VariantsError),
 
     #[error("'{name}' is locked as a conda package but only requested by pypi dependencies")]
@@ -582,18 +580,6 @@ pub enum PlatformUnsat {
 
     #[error(transparent)]
     InvalidChannel(#[from] ParseChannelError),
-
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    SourceCheckout(#[from] SourceCheckoutError),
-
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    DevSourceMetadata(#[from] DevSourceMetadataError),
-
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    SourceRecord(SourceRecordError),
 
     #[error("source package '{package}' requires rebuild or re-evaluation; forcing a full re-lock")]
     SourceRecordRequiresRebuild { package: String },
@@ -726,15 +712,6 @@ pub enum PlatformUnsat {
     },
 
     #[error(
-        "locked source package '{package}' does not match any of the outputs in the metadata of the package at '{manifest_path}', only the following outputs are available: {available}"
-    )]
-    NoMatchingSourcePackageInMetadata {
-        package: String,
-        manifest_path: String,
-        available: String,
-    },
-
-    #[error(
         "the locked package '{package}' with version '{locked_version}' does not satisfy the constraint '{constraint}'"
     )]
     ConstraintViolated {
@@ -758,25 +735,87 @@ pub enum SolveGroupUnsat {
     CondaPackageShouldBePypi { name: String },
 }
 
-impl From<SourceRecordError> for Box<PlatformUnsat> {
-    fn from(e: SourceRecordError) -> Self {
-        match e {
-            SourceRecordError::PackageNotProvided(ref e) => {
-                Box::new(PlatformUnsat::SourcePackageNotFoundInMetadata {
-                    package_name: e.name.as_source().to_string(),
-                    manifest_path: e.pinned_source.to_string(),
-                })
+/// Why a locked platform was not accepted.
+#[derive(Debug, Error, Diagnostic)]
+pub enum VerifyError {
+    /// The lock file disagrees with the workspace; re-solving fixes it.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Unsat(Box<PlatformUnsat>),
+
+    /// Verification itself failed; re-solving would hit the same failure.
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Unverifiable(UnverifiableError),
+}
+
+#[derive(Debug, Error, Diagnostic)]
+#[error(transparent)]
+#[diagnostic(transparent)]
+pub struct UnverifiableError(UnverifiableCause);
+
+#[derive(Debug, Error, Diagnostic)]
+enum UnverifiableCause {
+    #[error("failed to query the build backend for '{}'", .package.as_source())]
+    BackendMetadata {
+        package: PackageName,
+        #[source]
+        #[diagnostic_source]
+        source: BuildBackendMetadataError,
+    },
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    SourceCheckout(SourceCheckoutError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    DevSourceMetadata(DevSourceMetadataError),
+}
+
+impl VerifyError {
+    pub(crate) fn backend_metadata(
+        package: PackageName,
+        source: BuildBackendMetadataError,
+    ) -> Self {
+        Self::Unverifiable(UnverifiableError(UnverifiableCause::BackendMetadata {
+            package,
+            source,
+        }))
+    }
+}
+
+impl From<Box<PlatformUnsat>> for VerifyError {
+    fn from(unsat: Box<PlatformUnsat>) -> Self {
+        Self::Unsat(unsat)
+    }
+}
+
+impl From<PlatformUnsat> for VerifyError {
+    fn from(unsat: PlatformUnsat) -> Self {
+        Self::Unsat(Box::new(unsat))
+    }
+}
+
+impl From<SourceCheckoutError> for VerifyError {
+    fn from(err: SourceCheckoutError) -> Self {
+        Self::Unverifiable(UnverifiableError(UnverifiableCause::SourceCheckout(err)))
+    }
+}
+
+impl From<DevSourceMetadataError> for VerifyError {
+    fn from(err: DevSourceMetadataError) -> Self {
+        match err {
+            DevSourceMetadataError::PackageNotProvided(err) => {
+                PlatformUnsat::SourcePackageNotFoundInMetadata {
+                    package_name: err.name.as_source().to_string(),
+                    manifest_path: err.pinned_source.to_string(),
+                }
+                .into()
             }
-            SourceRecordError::NoMatchingVariant {
-                package,
-                manifest_path,
-                available,
-            } => Box::new(PlatformUnsat::NoMatchingSourcePackageInMetadata {
-                package,
-                manifest_path,
-                available,
-            }),
-            other => Box::new(PlatformUnsat::SourceRecord(other)),
+            other => Self::Unverifiable(UnverifiableError(UnverifiableCause::DevSourceMetadata(
+                other,
+            ))),
         }
     }
 }

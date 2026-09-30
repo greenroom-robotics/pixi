@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use pixi_command_dispatcher::{
-    CommandDispatcherError,
+    CommandDispatcherError, CommandDispatcherErrorResultExt,
     build::{
         Dependencies, PixiRunExports, convert_extra_dependencies,
         dependencies::{filter_match_specs, filter_match_specs_with_sources},
@@ -16,9 +16,9 @@ use rattler_conda_types::{
 };
 use std::collections::HashSet;
 
-use super::errors::{BuildOrHostEnv, PlatformUnsat, SourceRunDepKind};
+use super::errors::{BuildOrHostEnv, PlatformUnsat, SourceRunDepKind, VerifyError};
 use super::platform::{
-    VerifySatisfiabilityContext, failed_to_parse_match_spec_unsat,
+    VerifySatisfiabilityContext, failed, failed_to_parse_match_spec_unsat,
     spec_conversion_to_match_spec_error,
 };
 
@@ -68,7 +68,7 @@ pub(super) async fn verify_partial_source_record_against_backend(
     ctx: &VerifySatisfiabilityContext<'_>,
     platform_setup: &crate::lock_file::platform_setup::PlatformSetup,
     record: &pixi_record::UnresolvedSourceRecord,
-) -> Result<Arc<pixi_record::SourceRecord>, CommandDispatcherError<Box<PlatformUnsat>>> {
+) -> Result<Arc<pixi_record::SourceRecord>, CommandDispatcherError<VerifyError>> {
     use pixi_command_dispatcher::BuildBackendMetadataSpec;
 
     let pkg_name = record.name().clone();
@@ -103,15 +103,7 @@ pub(super) async fn verify_partial_source_record_against_backend(
             inline: inline.clone(),
         })
         .await
-        .map_err(|e| match e {
-            CommandDispatcherError::Cancelled => CommandDispatcherError::Cancelled,
-            CommandDispatcherError::Failed(err) => CommandDispatcherError::Failed(Box::new(
-                PlatformUnsat::SourcePackageMetadataChanged(
-                    pkg_name.as_source().to_string(),
-                    err.to_string(),
-                ),
-            )),
-        })?;
+        .map_err_with(|err| VerifyError::backend_metadata(pkg_name.clone(), err))?;
 
     // The query above read `[package.build.source]` from the manifest at this
     // record's own `manifest_source`, and resolved where it points. It only
@@ -128,13 +120,11 @@ pub(super) async fn verify_partial_source_record_against_backend(
         _ => false,
     };
     if !unchanged {
-        return Err(CommandDispatcherError::Failed(Box::new(
-            PlatformUnsat::PackageBuildSourceChanged {
-                package: pkg_name.as_source().to_string(),
-                locked: describe_build_source(record.build_source.as_ref()),
-                resolved: describe_build_source(resolved_build_source),
-            },
-        )));
+        return Err(failed(Box::new(PlatformUnsat::PackageBuildSourceChanged {
+            package: pkg_name.as_source().to_string(),
+            locked: describe_build_source(record.build_source.as_ref()),
+            resolved: describe_build_source(resolved_build_source),
+        })));
     }
 
     // Pick the matching output by (name, variants). Variants are
@@ -150,7 +140,7 @@ pub(super) async fn verify_partial_source_record_against_backend(
             o.metadata.name == pkg_name && variants_equivalent(locked_variants, &o.metadata.variant)
         })
         .ok_or_else(|| {
-            CommandDispatcherError::Failed(Box::new(PlatformUnsat::SourceVariantNotInBackend {
+            failed(Box::new(PlatformUnsat::SourceVariantNotInBackend {
                 package: pkg_name.as_source().to_string(),
                 manifest_source: record.manifest_source.to_string(),
                 variants: format_variants(locked_variants),
@@ -185,7 +175,7 @@ pub(super) async fn verify_partial_source_record_against_backend(
             &pkg_name,
             BuildOrHostEnv::Build,
         )
-        .map_err(CommandDispatcherError::Failed)?;
+        .map_err(failed)?;
     }
     if let Some(host_deps) = matching_output.host_dependencies.as_ref() {
         verify_locked_against_backend_specs(
@@ -197,7 +187,7 @@ pub(super) async fn verify_partial_source_record_against_backend(
             &pkg_name,
             BuildOrHostEnv::Host,
         )
-        .map_err(CommandDispatcherError::Failed)?;
+        .map_err(failed)?;
     }
 
     // Verify that the locked record's runtime `depends` and `constrains`
@@ -208,7 +198,7 @@ pub(super) async fn verify_partial_source_record_against_backend(
     // the build/host check above can't see, because changes there don't
     // necessarily perturb the build/host envs at all.
     verify_locked_run_deps_against_backend(record, matching_output, &platform_setup.channel_config)
-        .map_err(CommandDispatcherError::Failed)?;
+        .map_err(failed)?;
 
     // Synthesize a full record from the matching output. We use the
     // backend's freshly-computed PackageRecord (version, build,

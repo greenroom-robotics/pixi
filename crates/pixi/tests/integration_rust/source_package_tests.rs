@@ -4526,3 +4526,94 @@ my-package = {{ path = "./my-package" }}
         .expect_err("`pixi lock --check --dry-run` must fail when a host dependency changed");
     assert!(format_diagnostic(err.as_ref()).contains("not up-to-date"));
 }
+
+struct UnavailableBackend;
+
+impl pixi_build_frontend::in_memory::InMemoryBackendInstantiator for UnavailableBackend {
+    type Backend = PassthroughBackend;
+
+    fn initialize(
+        &self,
+        _params: pixi_build_frontend::types::procedures::initialize::InitializeParams,
+    ) -> Result<Self::Backend, Box<pixi_build_frontend::json_rpc::CommunicationError>> {
+        Err(Box::new(
+            pixi_build_frontend::json_rpc::CommunicationError::PrematureExit(
+                "unavailable".to_string(),
+                "backend unavailable".to_string(),
+            ),
+        ))
+    }
+
+    fn identifier(&self) -> &str {
+        "unavailable"
+    }
+}
+
+/// A locked check whose backend cannot start must report the backend
+/// failure instead of claiming the lock file is out of date.
+#[tokio::test]
+async fn test_locked_reports_unavailable_backend() {
+    setup_tracing();
+
+    let pixi = PixiControl::new()
+        .unwrap()
+        .with_backend_override(BackendOverride::from_memory(
+            PassthroughBackend::instantiator(),
+        ));
+
+    let source_dir = pixi.workspace_path().join("my-package");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::write(
+        source_dir.join("pixi.toml"),
+        r#"
+[package]
+name = "my-package"
+version = "1.0.0"
+
+[package.build]
+backend = { name = "passthrough", version = "*" }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        pixi.manifest_path(),
+        format!(
+            r#"
+[workspace]
+channels = []
+platforms = ["{platform}"]
+preview = ["pixi-build"]
+
+[dependencies]
+my-package = {{ path = "./my-package" }}
+"#,
+            platform = Platform::current(),
+        ),
+    )
+    .unwrap();
+
+    let workspace = pixi.workspace().unwrap();
+    workspace
+        .update_lock_file(None, UpdateLockFileOptions::default())
+        .await
+        .map(|_| ())
+        .expect("initial lock file generation should succeed");
+    fs::remove_dir_all(workspace.pixi_dir()).unwrap();
+
+    let err = workspace
+        .with_backend_override(BackendOverride::from_memory(UnavailableBackend))
+        .update_lock_file(
+            None,
+            UpdateLockFileOptions {
+                lock_file_usage: LockFileUsage::Locked,
+                ..UpdateLockFileOptions::default()
+            },
+        )
+        .await
+        .map(|_| ())
+        .expect_err("an unavailable backend must fail the locked check");
+
+    let report = format!("{err:?}");
+    assert!(report.contains("backend unavailable"), "{report}");
+    assert!(!report.contains("not up-to-date"), "{report}");
+}

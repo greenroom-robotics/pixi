@@ -16,7 +16,9 @@ use crate::{
     Workspace,
     lock_file::{
         records_by_name::LockedPypiRecordsByName,
-        satisfiability::{EnvironmentUnsat, verify_solve_group_satisfiability},
+        satisfiability::{
+            EnvironmentUnsat, UnverifiableError, VerifyError, verify_solve_group_satisfiability,
+        },
     },
     workspace::{Environment, SolveGroup},
 };
@@ -130,7 +132,7 @@ impl<'p> OutdatedEnvironments<'p> {
         command_dispatcher: CommandDispatcher,
         lock_file: &LockFile,
         resolver: &LockFileResolver,
-    ) -> Self {
+    ) -> Result<Self, UnverifiableError> {
         // Find all targets that are not satisfied by the lock file
         let (
             UnsatisfiableTargets {
@@ -142,7 +144,7 @@ impl<'p> OutdatedEnvironments<'p> {
             build_caches,
             static_metadata_cache,
             locked_pypi_records,
-        ) = find_unsatisfiable_targets(workspace, command_dispatcher, lock_file, resolver).await;
+        ) = find_unsatisfiable_targets(workspace, command_dispatcher, lock_file, resolver).await?;
 
         // Extend the outdated targets to include the solve groups
         let (mut conda_solve_groups_out_of_date, mut pypi_solve_groups_out_of_date) =
@@ -205,7 +207,7 @@ impl<'p> OutdatedEnvironments<'p> {
             })
             .collect();
 
-        Self {
+        Ok(Self {
             conda: outdated_conda,
             pypi: outdated_pypi,
             disregard_locked_content,
@@ -214,7 +216,7 @@ impl<'p> OutdatedEnvironments<'p> {
             build_caches,
             static_metadata_cache,
             locked_pypi_records,
-        }
+        })
     }
 
     /// Returns true if the lock file is up-to-date with the project (e.g. there
@@ -242,13 +244,16 @@ async fn find_unsatisfiable_targets<'p>(
     command_dispatcher: CommandDispatcher,
     lock_file: &LockFile,
     resolver: &LockFileResolver,
-) -> (
-    UnsatisfiableTargets<'p>,
-    OnceCell<UvResolutionContext>,
-    HashMap<BuildCacheKey, Arc<PypiEnvironmentBuildCache>>,
-    HashMap<PathBuf, pypi_metadata::LocalPackageMetadata>,
-    HashMap<(Environment<'p>, PixiPlatformName), LockedPypiRecordsByName>,
-) {
+) -> Result<
+    (
+        UnsatisfiableTargets<'p>,
+        OnceCell<UvResolutionContext>,
+        HashMap<BuildCacheKey, Arc<PypiEnvironmentBuildCache>>,
+        HashMap<PathBuf, pypi_metadata::LocalPackageMetadata>,
+        HashMap<(Environment<'p>, PixiPlatformName), LockedPypiRecordsByName>,
+    ),
+    UnverifiableError,
+> {
     let mut verified_environments = HashMap::new();
     let mut locked_pypi_by_env_platform = HashMap::new();
     let mut unsatisfiable_targets = UnsatisfiableTargets::default();
@@ -410,7 +415,12 @@ async fn find_unsatisfiable_targets<'p>(
                         // Cancellation is handled by CancellationAwareFutures;
                         // remaining platforms will be skipped automatically.
                     }
-                    Err(CommandDispatcherError::Failed(unsat)) if unsat.is_pypi_only() => {
+                    Err(CommandDispatcherError::Failed(VerifyError::Unverifiable(err))) => {
+                        return Err(err);
+                    }
+                    Err(CommandDispatcherError::Failed(VerifyError::Unsat(unsat)))
+                        if unsat.is_pypi_only() =>
+                    {
                         tracing::info!(
                             "the pypi dependencies of environment '{0}' for platform {platform} are out of date because {unsat}",
                             environment.name().fancy_display()
@@ -422,7 +432,7 @@ async fn find_unsatisfiable_targets<'p>(
                             .or_default()
                             .insert(platform);
                     }
-                    Err(CommandDispatcherError::Failed(unsat)) => {
+                    Err(CommandDispatcherError::Failed(VerifyError::Unsat(unsat))) => {
                         tracing::info!(
                             "the dependencies of environment '{0}' for platform {platform} are out of date because {unsat}",
                             environment.name().fancy_display()
@@ -496,13 +506,13 @@ async fn find_unsatisfiable_targets<'p>(
             .insert(platform);
     }
 
-    (
+    Ok((
         unsatisfiable_targets,
         uv_context,
         build_caches.into_iter().collect(),
         static_metadata_cache.into_iter().collect(),
         locked_pypi_by_env_platform,
-    )
+    ))
 }
 
 /// Given a mapping of outdated targets, construct a new mapping of all the
