@@ -29,7 +29,7 @@ use pixi_path::AbsPresumedDirPathBuf;
 use pixi_record::PixiRecord;
 use pixi_spec::{BinarySpec, ResolvedExcludeNewer, SourceAnchor, SpecConversionError};
 use pixi_spec_containers::DependencyMap;
-use rattler_conda_types::{PackageName, VersionWithSource};
+use rattler_conda_types::PackageName;
 use rattler_shell::{
     activation::{ActivationError, ActivationVariables, Activator},
     shell::ShellEnum,
@@ -38,6 +38,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::InlinePackage;
+use crate::backend_identity::{EnvDigest, PackageBackend};
 use crate::compute_data::HasInstantiateBackendReporter;
 use crate::ephemeral_env::{EphemeralEnvError, EphemeralEnvKey, EphemeralEnvSpec};
 use crate::injected_config::ToolBuildEnvironmentKey;
@@ -430,9 +431,10 @@ impl InstantiateBackendKey {
                 build_backend_name: resolved_spec.name.clone(),
             })
         })?;
-        let version =
-            primary_package_version_from_records(&installed.records, &env_spec.requirement.0)
-                .expect("solved env contains the requested primary package");
+        let version = primary_package_record(&installed.records, &env_spec.requirement.0)
+            .expect("solved env contains the requested primary package")
+            .version
+            .clone();
 
         let host_platform = ctx.compute(&ToolBuildEnvironmentKey).await.host_platform;
         let activator =
@@ -549,22 +551,43 @@ pub async fn resolve_backend_identifier(
             .clone()
             .unwrap_or_else(|| resolved_spec.name.clone())),
         ResolvedBackendCommand::Spec(CommandSpec::EnvironmentSpec(env_spec)) => {
-            let ephemeral_spec = ephemeral_env_spec_for(env_spec, exclude_newer);
-            let installed = ctx
-                .compute(&EphemeralEnvKey::new(ephemeral_spec))
-                .await
-                .map_err(InstantiateBackendError::EphemeralEnv)
-                .map_err(Arc::new)?;
-            let version =
-                primary_package_version_from_records(&installed.records, &env_spec.requirement.0)
-                    .expect("solved env contains the requested primary package");
-            let cmd = env_spec
-                .command
-                .clone()
-                .unwrap_or_else(|| resolved_spec.name.clone());
-            Ok(format!("{cmd}@{version}"))
+            let package =
+                resolve_package_backend(ctx, env_spec, &resolved_spec.name, exclude_newer).await?;
+            Ok(format!("{}@{}", package.command, package.version))
         }
     }
+}
+
+/// Solve (or reuse) the ephemeral environment of an environment-spec
+/// backend and identify the installed primary package, without spawning
+/// the backend.
+pub(crate) async fn resolve_package_backend(
+    ctx: &mut ComputeCtx,
+    env_spec: &EnvironmentSpec,
+    backend_name: &str,
+    exclude_newer: Option<ResolvedExcludeNewer>,
+) -> Result<PackageBackend, Arc<InstantiateBackendError>> {
+    let installed = ctx
+        .compute(&EphemeralEnvKey::new(ephemeral_env_spec_for(
+            env_spec,
+            exclude_newer,
+        )))
+        .await
+        .map_err(InstantiateBackendError::EphemeralEnv)
+        .map_err(Arc::new)?;
+    let name = &env_spec.requirement.0;
+    let primary = primary_package_record(&installed.records, name)
+        .expect("solved env contains the requested primary package");
+    Ok(PackageBackend {
+        command: env_spec
+            .command
+            .clone()
+            .unwrap_or_else(|| backend_name.to_string()),
+        name: name.clone(),
+        version: primary.version.clone(),
+        build: primary.build.clone(),
+        env_digest: EnvDigest::from_records(&installed.records),
+    })
 }
 
 /// Build a [`Tool::System`] that runs the backend's executable directly
@@ -589,15 +612,12 @@ fn api_version_from_records(records: &[PixiRecord]) -> Option<PixiBuildApiVersio
     })
 }
 
-/// Find the version of the primary backend package in the solved records.
-fn primary_package_version_from_records(
-    records: &[PixiRecord],
+fn primary_package_record<'a>(
+    records: &'a [PixiRecord],
     name: &PackageName,
-) -> Option<VersionWithSource> {
+) -> Option<&'a rattler_conda_types::PackageRecord> {
     records.iter().find_map(|r| match r {
-        PixiRecord::Binary(b) if b.package_record.name == *name => {
-            Some(b.package_record.version.clone())
-        }
+        PixiRecord::Binary(b) if b.package_record.name == *name => Some(&b.package_record),
         _ => None,
     })
 }
