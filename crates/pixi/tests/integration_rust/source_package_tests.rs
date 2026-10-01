@@ -4617,3 +4617,125 @@ my-package = {{ path = "./my-package" }}
     assert!(report.contains("backend unavailable"), "{report}");
     assert!(!report.contains("not up-to-date"), "{report}");
 }
+
+fn passthrough_workspace() -> PixiControl {
+    PixiControl::new()
+        .unwrap()
+        .with_backend_override(BackendOverride::from_memory(
+            PassthroughBackend::instantiator(),
+        ))
+}
+
+fn write_path_source(pixi: &PixiControl, dir: &str, name: &str, extra: &str) {
+    let path = pixi.workspace_path().join(dir);
+    fs::create_dir_all(&path).unwrap();
+    write_source_package_manifest(&path, name, "1.0.0", extra);
+}
+
+fn write_path_dependency_workspace(pixi: &PixiControl, dependencies: &[(&str, &str)]) {
+    let dependencies = dependencies
+        .iter()
+        .map(|(name, dir)| format!(r#"{name} = {{ path = "./{dir}" }}"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        pixi.manifest_path(),
+        format!(
+            r#"
+[workspace]
+channels = []
+platforms = ["{platform}"]
+preview = ["pixi-build"]
+
+[dependencies]
+{dependencies}
+"#,
+            platform = Platform::current(),
+        ),
+    )
+    .unwrap();
+}
+
+/// `--locked` reports the lock as out of date, and re-locking succeeds.
+async fn assert_outdated_then_relocks(pixi: &PixiControl, what: &str) {
+    let err = verify_locked(pixi)
+        .await
+        .expect_err("`--locked` must reject the stale lock");
+    let report = format_diagnostic(err.as_ref());
+    assert!(report.contains("not up-to-date"), "{what}: {report}");
+    write_lock(pixi).await;
+    if let Err(err) = verify_locked(pixi).await {
+        panic!("`--locked` must accept the refreshed lock after {what}, got: {err:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_relock_after_path_source_directory_renamed() {
+    setup_tracing();
+    let pixi = passthrough_workspace();
+    write_path_source(&pixi, "pkg-a", "pkg-a", "");
+    write_path_dependency_workspace(&pixi, &[("pkg-a", "pkg-a")]);
+    write_lock(&pixi).await;
+
+    fs::rename(
+        pixi.workspace_path().join("pkg-a"),
+        pixi.workspace_path().join("pkg-renamed"),
+    )
+    .unwrap();
+    write_path_dependency_workspace(&pixi, &[("pkg-a", "pkg-renamed")]);
+
+    assert_outdated_then_relocks(&pixi, "renaming the source directory").await;
+}
+
+#[tokio::test]
+async fn test_relock_after_path_source_removed_and_deleted() {
+    setup_tracing();
+    let pixi = passthrough_workspace();
+    write_path_source(&pixi, "pkg-a", "pkg-a", "");
+    write_path_source(&pixi, "pkg-b", "pkg-b", "");
+    write_path_dependency_workspace(&pixi, &[("pkg-a", "pkg-a"), ("pkg-b", "pkg-b")]);
+    write_lock(&pixi).await;
+
+    fs::remove_dir_all(pixi.workspace_path().join("pkg-a")).unwrap();
+    write_path_dependency_workspace(&pixi, &[("pkg-b", "pkg-b")]);
+
+    assert_outdated_then_relocks(&pixi, "removing and deleting a source").await;
+}
+
+#[tokio::test]
+async fn test_relock_after_transitive_path_source_dropped_and_deleted() {
+    setup_tracing();
+    let pixi = passthrough_workspace();
+    write_path_source(&pixi, "pkg-a", "pkg-a", "");
+    write_path_source(
+        &pixi,
+        "pkg-b",
+        "pkg-b",
+        "[package.run-dependencies]\npkg-a = { path = \"../pkg-a\" }",
+    );
+    write_path_dependency_workspace(&pixi, &[("pkg-b", "pkg-b")]);
+    write_lock(&pixi).await;
+
+    fs::remove_dir_all(pixi.workspace_path().join("pkg-a")).unwrap();
+    write_path_source(&pixi, "pkg-b", "pkg-b", "");
+
+    assert_outdated_then_relocks(&pixi, "dropping and deleting a transitive source").await;
+}
+
+#[tokio::test]
+async fn test_lock_reports_missing_required_path_source() {
+    setup_tracing();
+    let pixi = passthrough_workspace();
+    write_path_source(&pixi, "pkg-a", "pkg-a", "");
+    write_path_dependency_workspace(&pixi, &[("pkg-a", "pkg-a")]);
+    write_lock(&pixi).await;
+
+    fs::remove_dir_all(pixi.workspace_path().join("pkg-a")).unwrap();
+
+    let err = verify_locked(&pixi)
+        .await
+        .expect_err("a missing required source must fail the locked check");
+    let report = format_diagnostic(err.as_ref());
+    assert!(report.contains("pkg-a"), "{report}");
+    assert!(!report.contains("not up-to-date"), "{report}");
+}

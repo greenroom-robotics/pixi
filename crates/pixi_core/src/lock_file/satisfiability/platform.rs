@@ -7,7 +7,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use itertools::{Either, Itertools};
 use once_cell::sync::OnceCell;
 use pixi_command_dispatcher::{
@@ -161,6 +161,122 @@ fn build_platform_verification_setup(
     })
 }
 
+/// Rejects locked source records the environment no longer asks for, using
+/// only the lock and the manifest.
+///
+/// A direct source dependency must match the location its locked record was
+/// built from. Mutable or partial records must be reachable from the
+/// environment's dependencies through the locked dependency graph. Dependencies
+/// are followed by name alone, so reachability is over-approximated and some
+/// unreachable records go unreported. Dev dependencies reach records through
+/// backend metadata the lock does not hold, so reachability is skipped when
+/// there are any.
+fn verify_locked_sources_still_requested(
+    ctx: &VerifySatisfiabilityContext<'_>,
+    records: &[UnresolvedPixiRecord],
+) -> Result<(), Box<PlatformUnsat>> {
+    let pixi_platform = ctx
+        .environment
+        .workspace_manifest()
+        .workspace
+        .platform_by_name(&ctx.platform);
+
+    let mut by_name: HashMap<&PackageName, Vec<&UnresolvedPixiRecord>> = HashMap::new();
+    for record in records {
+        by_name.entry(record.name()).or_default().push(record);
+    }
+
+    let mut stack: Vec<PackageName> = Vec::new();
+    for (name, spec) in ctx
+        .environment
+        .combined_dependencies(pixi_platform)
+        .into_specs()
+    {
+        if let Either::Left(source_spec) = spec.into_source_or_binary()
+            && source_spec.matchspec.condition.is_none()
+            && let Some(locked) = by_name
+                .get(&name)
+                .into_iter()
+                .flatten()
+                .find_map(|record| record.as_source())
+        {
+            locked
+                .manifest_source
+                .satisfies(&source_spec)
+                .map_err(|e| {
+                    PlatformUnsat::SourcePackageMismatch(name.as_source().to_string(), e)
+                })?;
+        }
+        stack.push(name);
+    }
+
+    if !ctx
+        .environment
+        .combined_dev_dependencies(pixi_platform)
+        .is_empty()
+    {
+        return Ok(());
+    }
+    if ctx.environment.has_pypi_dependencies() {
+        stack.extend(
+            records
+                .iter()
+                .filter(|record| provides_pypi_packages(record))
+                .map(|record| record.name().clone()),
+        );
+    }
+
+    let mut reached: HashSet<PackageName> = HashSet::new();
+    while let Some(name) = stack.pop() {
+        if !reached.insert(name.clone()) {
+            continue;
+        }
+        for record in by_name.get(&name).into_iter().flatten() {
+            let extra_depends = match record {
+                UnresolvedPixiRecord::Binary(binary) => &binary.package_record.extra_depends,
+                UnresolvedPixiRecord::Source(source) => source.experimental_extra_depends(),
+            };
+            for depends in record
+                .depends()
+                .iter()
+                .chain(extra_depends.values().flatten())
+            {
+                let Ok(spec) = MatchSpec::from_str(
+                    depends,
+                    ParseMatchSpecOptions::lenient().with_repodata_revision(RepodataRevision::V3),
+                ) else {
+                    return Ok(());
+                };
+                stack.extend(spec.name.as_exact().cloned());
+            }
+        }
+    }
+
+    let unrequired: Vec<PackageName> = records
+        .iter()
+        .filter_map(UnresolvedPixiRecord::as_source)
+        .filter(|source| source.data.is_partial() || source.has_mutable_source())
+        .filter(|source| !reached.contains(source.name()))
+        .map(|source| source.name().clone())
+        .collect();
+    if unrequired.is_empty() {
+        Ok(())
+    } else {
+        Err(Box::new(PlatformUnsat::TooManyCondaPackages(unrequired)))
+    }
+}
+
+fn provides_pypi_packages(record: &UnresolvedPixiRecord) -> bool {
+    let purls = match record {
+        UnresolvedPixiRecord::Binary(binary) => &binary.package_record.purls,
+        UnresolvedPixiRecord::Source(source) => match &source.data {
+            SourceRecordData::Full(full) => &full.package_record.purls,
+            SourceRecordData::Partial(partial) => &partial.purls,
+        },
+    };
+    purls.as_ref().is_some_and(|purls| !purls.is_empty())
+}
+
 /// Verifies that the package requirements of the specified `environment` can be
 /// satisfied with the packages present in the lock file.
 ///
@@ -222,6 +338,8 @@ pub async fn verify_platform_satisfiability(
     )
     .await
     .map_err_with(|err| VerifyError::from(PlatformUnsat::LegacySourceEnvReify(err.to_string())))?;
+
+    verify_locked_sources_still_requested(ctx, &unresolved_records).map_err(failed)?;
 
     // Resolve every unresolved source record into a fully-resolved
     // [`PixiRecord::Source`].
@@ -322,7 +440,20 @@ pub async fn verify_platform_satisfiability(
         });
     }
 
-    let mut indexed_records: Vec<(usize, PixiRecord)> = resolve_futures.try_collect().await?;
+    let mut indexed_records: Vec<(usize, PixiRecord)> = Vec::new();
+    let mut unverifiable = None;
+    while let Some(result) = resolve_futures.next().await {
+        match result {
+            Ok(record) => indexed_records.push(record),
+            Err(CommandDispatcherError::Failed(err @ VerifyError::Unverifiable(_))) => {
+                unverifiable.get_or_insert(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    if let Some(err) = unverifiable {
+        return Err(failed(err));
+    }
     indexed_records.sort_by_key(|(index, _)| *index);
     let resolved_records: Vec<PixiRecord> = indexed_records
         .into_iter()
