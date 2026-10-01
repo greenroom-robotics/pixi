@@ -14,7 +14,7 @@ use super::common::{
 };
 use crate::backend_identity::BackendIdentity;
 use crate::build::CanonicalSourceCodeLocation;
-use crate::input_hash::{ConfigurationHash, ProjectModelHash};
+use crate::input_hash::{BackendSpecHash, ConfigurationHash, ProjectModelHash};
 use crate::input_snapshot::InputSnapshot;
 use rattler_conda_types::PackageName;
 
@@ -171,8 +171,14 @@ pub struct BuildBackendMetadataCacheEntry {
     #[serde(default)]
     pub configuration_hash: ConfigurationHash,
 
+    /// The hash of the backend specification (name + version constraints +
+    /// channels), compared in place of the backend identity when the backend
+    /// cannot be identified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_spec_hash: Option<BackendSpecHash>,
+
     /// The backend that produced these outputs. `None` when the backend
-    /// could not be identified, which never matches on a probe.
+    /// could not be identified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_identity: Option<BackendIdentity>,
 

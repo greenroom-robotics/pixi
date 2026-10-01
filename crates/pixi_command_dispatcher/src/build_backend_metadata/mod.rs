@@ -27,7 +27,7 @@ use crate::compute_data::{
     HasBuildBackendMetadataCache, HasBuildBackendMetadataReporter, HasIoConcurrencySemaphore,
 };
 use crate::injected_config::EnabledProtocolsKey;
-use crate::input_hash::{ConfigurationHash, ProjectModelHash};
+use crate::input_hash::{BackendSpecHash, ConfigurationHash, ProjectModelHash};
 use crate::input_snapshot::{InputSnapshot, SnapshotFreshness};
 use crate::instantiate_backend_key::resolve_package_backend;
 use crate::keys::BackendBinaryFingerprintKey;
@@ -42,13 +42,12 @@ use pixi_build_discovery::{
 };
 use pixi_compute_cache_dirs::CacheDirsExt;
 use pixi_compute_engine::{ComputeCtx, Key};
-use pixi_compute_network::HasOffline;
 use pixi_path::normalize::normalize_typed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BackendWarning {
     CacheDisabled,
-    UnverifiedOffline,
+    Unidentified,
 }
 
 static WARNED_BACKENDS: Lazy<Mutex<HashSet<(String, BackendWarning)>>> =
@@ -64,8 +63,8 @@ fn warn_once_per_backend(backend_name: &str, warning: BackendWarning) {
             "metadata cache disabled for build backend '{}' (mutable environment backend)",
             backend_name
         ),
-        BackendWarning::UnverifiedOffline => tracing::warn!(
-            "using cached metadata for build backend '{}' without verifying the backend version (offline)",
+        BackendWarning::Unidentified => tracing::warn!(
+            "using cached metadata for build backend '{}' without verifying the backend version, because the backend could not be identified",
             backend_name
         ),
     }
@@ -274,12 +273,12 @@ pub struct BuildBackendMetadata {
 enum BackendCacheStrategy {
     /// Entries are valid only when produced by this exact backend.
     Cache(BackendIdentity),
-    /// Offline, the backend environment cannot be re-solved, so entries
-    /// are trusted without checking the backend. The identity is recorded
-    /// from the environment the backend is instantiated from.
-    TrustOffline {
+    /// The backend could not be identified, so entries are trusted when
+    /// they were written for the same backend specification.
+    Unidentified {
         env_spec: Box<EnvironmentSpec>,
         backend_name: String,
+        spec_hash: BackendSpecHash,
     },
     /// Caching disabled (mutable env-based backend, or a system binary
     /// we couldn't locate).
@@ -287,9 +286,21 @@ enum BackendCacheStrategy {
 }
 
 impl BackendCacheStrategy {
-    fn accepts(&self, cached: Option<&BackendIdentity>) -> bool {
+    fn accepts(
+        &self,
+        cached: Option<&BackendIdentity>,
+        cached_spec_hash: Option<BackendSpecHash>,
+    ) -> bool {
         let expected = match self {
-            Self::TrustOffline { .. } => return true,
+            Self::Unidentified { spec_hash, .. } => {
+                let accepted = cached_spec_hash == Some(*spec_hash);
+                if !accepted {
+                    tracing::info!(
+                        "found cached outputs with different backend specification, invalidating cache."
+                    );
+                }
+                return accepted;
+            }
             Self::Skip { .. } => return false,
             Self::Cache(expected) => expected,
         };
@@ -375,20 +386,28 @@ impl BuildBackendMetadataInner {
                     reason: "mutable-environment",
                 }
             }
-            ResolvedBackendCommand::Spec(CommandSpec::EnvironmentSpec(env_spec))
-                if ctx.global_data().offline() =>
-            {
-                BackendCacheStrategy::TrustOffline {
-                    env_spec: env_spec.clone(),
-                    backend_name: spec.name.clone(),
-                }
-            }
             ResolvedBackendCommand::Spec(CommandSpec::EnvironmentSpec(env_spec)) => {
-                let package =
-                    resolve_package_backend(ctx, env_spec, &spec.name, self.exclude_newer.clone())
-                        .await
-                        .map_err(initialize_error)?;
-                BackendCacheStrategy::Cache(BackendIdentity::Package(Box::new(package)))
+                match resolve_package_backend(ctx, env_spec, &spec.name, self.exclude_newer.clone())
+                    .await
+                {
+                    Ok(package) => {
+                        BackendCacheStrategy::Cache(BackendIdentity::Package(Box::new(package)))
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            backend = %spec.name,
+                            error = %err,
+                            "could not identify build backend",
+                        );
+                        BackendCacheStrategy::Unidentified {
+                            env_spec: env_spec.clone(),
+                            backend_name: spec.name.clone(),
+                            spec_hash: BackendSpecHash::from(
+                                &checkouts.discovered_backend.backend_spec,
+                            ),
+                        }
+                    }
+                }
             }
         })
     }
@@ -428,7 +447,10 @@ impl BuildBackendMetadataInner {
             return Ok(CacheFreshness::Stale(Some(cache_entry)));
         }
 
-        if !strategy.accepts(cache_entry.backend_identity.as_ref()) {
+        if !strategy.accepts(
+            cache_entry.backend_identity.as_ref(),
+            cache_entry.backend_spec_hash,
+        ) {
             return Ok(CacheFreshness::Stale(Some(cache_entry)));
         }
 
@@ -1012,8 +1034,8 @@ impl BuildBackendMetadataInner {
         cache_key: &CacheKey<BuildBackendMetadataCache>,
         metadata: CacheEntry<BuildBackendMetadataCache>,
     ) -> CacheProbe {
-        if let BackendCacheStrategy::TrustOffline { .. } = strategy {
-            warn_once_per_backend(&spec.name, BackendWarning::UnverifiedOffline);
+        if let BackendCacheStrategy::Unidentified { .. } = strategy {
+            warn_once_per_backend(&spec.name, BackendWarning::Unidentified);
         }
         tracing::debug!("Using cached build backend metadata");
         CacheProbe::Hit(BuildBackendMetadata {
@@ -1075,9 +1097,10 @@ impl BuildBackendMetadataInner {
 
         let (backend_identity, skip_cache) = match strategy {
             BackendCacheStrategy::Cache(identity) => (Some(identity), false),
-            BackendCacheStrategy::TrustOffline {
+            BackendCacheStrategy::Unidentified {
                 env_spec,
                 backend_name,
+                ..
             } => {
                 let package = resolve_package_backend(
                     ctx,
@@ -1176,6 +1199,9 @@ impl BuildBackendMetadataInner {
             source: canonical_source,
             project_model_hash,
             configuration_hash,
+            backend_spec_hash: Some(BackendSpecHash::from(
+                &checkouts.discovered_backend.backend_spec,
+            )),
             backend_identity,
             timestamp: raw.timestamp,
         };
@@ -1499,8 +1525,8 @@ mod tests {
         }))
     }
 
-    fn offline_strategy() -> BackendCacheStrategy {
-        BackendCacheStrategy::TrustOffline {
+    fn unidentified_strategy() -> BackendCacheStrategy {
+        BackendCacheStrategy::Unidentified {
             env_spec: Box::new(EnvironmentSpec {
                 requirement: (
                     PackageName::try_from("pixi-build-ros").unwrap(),
@@ -1512,7 +1538,12 @@ mod tests {
                 command: None,
             }),
             backend_name: "pixi-build-ros".to_string(),
+            spec_hash: spec_hash(1),
         }
+    }
+
+    fn spec_hash(value: u64) -> BackendSpecHash {
+        serde_json::from_value(value.into()).unwrap()
     }
 
     fn cache_entry_json(backend_identity: Option<&BackendIdentity>) -> serde_json::Value {
@@ -1521,6 +1552,7 @@ mod tests {
             cache_version: 1,
             project_model_hash: None,
             configuration_hash: ConfigurationHash::default(),
+            backend_spec_hash: None,
             backend_identity: backend_identity.cloned(),
             source: CanonicalSourceCodeLocation::new(
                 PinnedSourceSpec::Path(pixi_record::PinnedPathSpec {
@@ -1543,19 +1575,27 @@ mod tests {
     #[test]
     fn cached_outputs_from_a_different_backend_are_stale() {
         let strategy = BackendCacheStrategy::Cache(package_identity("0.8.1"));
-        assert!(!strategy.accepts(Some(&package_identity("0.5.0"))));
+        assert!(!strategy.accepts(Some(&package_identity("0.5.0")), None));
     }
 
     #[test]
     fn cached_outputs_from_the_same_backend_are_fresh() {
         let strategy = BackendCacheStrategy::Cache(package_identity("0.8.1"));
-        assert!(strategy.accepts(Some(&package_identity("0.8.1"))));
+        assert!(strategy.accepts(Some(&package_identity("0.8.1")), None));
     }
 
     #[test]
-    fn offline_trusts_cached_outputs_without_an_identity() {
-        assert!(offline_strategy().accepts(Some(&package_identity("0.5.0"))));
-        assert!(offline_strategy().accepts(None));
+    fn unidentified_backend_trusts_cached_outputs_for_the_same_spec() {
+        let strategy = unidentified_strategy();
+        assert!(strategy.accepts(Some(&package_identity("0.5.0")), Some(spec_hash(1))));
+        assert!(strategy.accepts(None, Some(spec_hash(1))));
+    }
+
+    #[test]
+    fn unidentified_backend_rejects_cached_outputs_for_another_spec() {
+        let strategy = unidentified_strategy();
+        assert!(!strategy.accepts(Some(&package_identity("0.5.0")), Some(spec_hash(2))));
+        assert!(!strategy.accepts(Some(&package_identity("0.5.0")), None));
     }
 
     #[test]
@@ -1569,7 +1609,7 @@ mod tests {
 
         assert_eq!(entry.backend_identity, None);
         let strategy = BackendCacheStrategy::Cache(package_identity("0.8.1"));
-        assert!(!strategy.accepts(entry.backend_identity.as_ref()));
+        assert!(!strategy.accepts(entry.backend_identity.as_ref(), entry.backend_spec_hash));
     }
 
     #[test]
