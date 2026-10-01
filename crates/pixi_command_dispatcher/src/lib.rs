@@ -38,6 +38,7 @@
 //! created and awaited concurrently. This enables parallel execution while
 //! maintaining a simple API surface.
 
+mod backend_identity;
 mod backend_source_build;
 pub mod build;
 mod build_backend_metadata;
@@ -69,6 +70,7 @@ mod solve_binary;
 mod solve_conda;
 mod util;
 
+pub use backend_identity::{BackendIdentity, EnvDigest, PackageBackend};
 pub use backend_source_build::{
     BackendBuiltSource, BackendSourceBuildError, BackendSourceBuildExt, BackendSourceBuildMethod,
     BackendSourceBuildPrefix, BackendSourceBuildSpec, BackendSourceBuildV1Method,

@@ -12,10 +12,9 @@ use super::common::{
     CacheError, CacheKeyString, CacheRevision, MetadataCache, MetadataCacheEntry, MetadataCacheKey,
     VersionedCacheEntry, WriteResult as CommonWriteResult,
 };
+use crate::backend_identity::BackendIdentity;
 use crate::build::CanonicalSourceCodeLocation;
-use crate::input_hash::{
-    BackendBinaryFingerprint, BackendSpecHash, ConfigurationHash, ProjectModelHash,
-};
+use crate::input_hash::{BackendSpecHash, ConfigurationHash, ProjectModelHash};
 use crate::input_snapshot::InputSnapshot;
 use rattler_conda_types::PackageName;
 
@@ -173,20 +172,15 @@ pub struct BuildBackendMetadataCacheEntry {
     pub configuration_hash: ConfigurationHash,
 
     /// The hash of the backend specification (name + version constraints +
-    /// channels). The backend spec is not part of the `ProjectModel`, so
-    /// without this field, changes like bumping a backend version constraint
-    /// in the manifest would not invalidate the cache.
+    /// channels), compared in place of the backend identity when the backend
+    /// cannot be identified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_spec_hash: Option<BackendSpecHash>,
 
-    /// Content fingerprint of the backend executable. `Some` only for
-    /// system / path-based backends where the binary's identity isn't
-    /// captured by `backend_spec_hash` (a version constraint there doesn't
-    /// pin the actual executable on disk). On cache probe we recompute
-    /// the fingerprint and invalidate on mismatch; rebuilding the backend
-    /// is what flips this hash.
+    /// The backend that produced these outputs. `None` when the backend
+    /// could not be identified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend_binary_fingerprint: Option<BackendBinaryFingerprint>,
+    pub backend_identity: Option<BackendIdentity>,
 
     /// The pinned location of the source code. Although the specification of
     /// where to find the source is part of the `project_model_hash`, the

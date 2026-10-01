@@ -15,6 +15,7 @@ use std::{
 use thiserror::Error;
 use tracing::instrument;
 
+use crate::backend_identity::BackendIdentity;
 use crate::build::CanonicalSourceCodeLocation;
 use crate::cache::markers::BackendMetadataDir;
 use crate::cache::{
@@ -25,33 +26,47 @@ use crate::cache::{
 use crate::compute_data::{
     HasBuildBackendMetadataCache, HasBuildBackendMetadataReporter, HasIoConcurrencySemaphore,
 };
-use crate::injected_config::{BackendOverrideKey, EnabledProtocolsKey};
-use crate::input_hash::{
-    BackendBinaryFingerprint, BackendSpecHash, ConfigurationHash, ProjectModelHash,
-};
+use crate::injected_config::EnabledProtocolsKey;
+use crate::input_hash::{BackendSpecHash, ConfigurationHash, ProjectModelHash};
 use crate::input_snapshot::{InputSnapshot, SnapshotFreshness};
+use crate::instantiate_backend_key::resolve_package_backend;
 use crate::keys::BackendBinaryFingerprintKey;
 use crate::{
     BackendHandle, BuildEnvironment, EnvironmentRef, InlinePackage, InstantiateBackendError,
-    InstantiateBackendKey, ProjectModelOverrides, SourceCheckout, SourceCheckoutError,
-    SourceCheckoutExt,
+    InstantiateBackendKey, ProjectModelOverrides, ResolvedBackendCommand,
+    ResolvedBackendCommandKey, SourceCheckout, SourceCheckoutError, SourceCheckoutExt,
     build::{PinnedSourceCodeLocation, SourceRecordOrCheckout, WorkDirKey},
 };
-use pixi_build_discovery::{BackendSpec, CommandSpec, SystemCommandSpec};
-use pixi_build_frontend::BackendOverride;
+use pixi_build_discovery::{
+    BackendSpec, CommandSpec, EnvironmentSpec, JsonRpcBackendSpec, SystemCommandSpec,
+};
 use pixi_compute_cache_dirs::CacheDirsExt;
 use pixi_compute_engine::{ComputeCtx, Key};
 use pixi_path::normalize::normalize_typed;
 
-static WARNED_BACKENDS: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BackendWarning {
+    CacheDisabled,
+    Unidentified,
+}
 
-fn warn_once_per_backend(backend_name: &str) {
+static WARNED_BACKENDS: Lazy<Mutex<HashSet<(String, BackendWarning)>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+
+fn warn_once_per_backend(backend_name: &str, warning: BackendWarning) {
     let mut warned = WARNED_BACKENDS.lock().unwrap();
-    if warned.insert(backend_name.to_string()) {
-        tracing::warn!(
+    if !warned.insert((backend_name.to_string(), warning)) {
+        return;
+    }
+    match warning {
+        BackendWarning::CacheDisabled => tracing::warn!(
             "metadata cache disabled for build backend '{}' (mutable environment backend)",
             backend_name
-        );
+        ),
+        BackendWarning::Unidentified => tracing::warn!(
+            "using cached metadata for build backend '{}' without verifying the backend version, because the backend could not be identified",
+            backend_name
+        ),
     }
 }
 
@@ -256,61 +271,145 @@ pub struct BuildBackendMetadata {
 /// What the metadata cache needs to do for a given backend.
 #[derive(Debug, Clone)]
 enum BackendCacheStrategy {
-    /// Backend is package-resolved; spec hash alone identifies it.
-    PackageResolved,
-    /// System / path-based backend; fingerprint the binary on disk so
-    /// the cache invalidates on rebuild.
-    Fingerprint(PathBuf),
+    /// Entries are valid only when produced by this exact backend.
+    Cache(BackendIdentity),
+    /// The backend could not be identified, so entries are trusted when
+    /// they were written for the same backend specification.
+    Unidentified {
+        env_spec: Box<EnvironmentSpec>,
+        backend_name: String,
+        spec_hash: BackendSpecHash,
+    },
     /// Caching disabled (mutable env-based backend, or a system binary
     /// we couldn't locate).
     Skip { reason: &'static str },
 }
 
-impl BuildBackendMetadataInner {
-    /// Decide how the metadata cache should treat this backend.
-    fn cache_strategy(
-        backend_spec: &BackendSpec,
-        backend_override: &BackendOverride,
-    ) -> BackendCacheStrategy {
-        let BackendSpec::JsonRpc(json_rpc_spec) = backend_spec;
-
-        // A `BackendOverride::System` for this backend points at an
-        // executable that supersedes whatever the manifest declares.
-        // In-memory overrides are deterministic and don't need a
-        // fingerprint.
-        if let BackendOverride::System(overridden) = backend_override
-            && let Some(CommandSpec::System(SystemCommandSpec { command: Some(cmd) })) =
-                overridden.named_backend_override(&json_rpc_spec.name)
-        {
-            return match which::which(&cmd).ok() {
-                Some(path) => BackendCacheStrategy::Fingerprint(path),
-                None => BackendCacheStrategy::Skip {
-                    reason: "override-unresolved",
-                },
-            };
+impl BackendCacheStrategy {
+    fn accepts(
+        &self,
+        cached: Option<&BackendIdentity>,
+        cached_spec_hash: Option<BackendSpecHash>,
+    ) -> bool {
+        let expected = match self {
+            Self::Unidentified { spec_hash, .. } => {
+                let accepted = cached_spec_hash == Some(*spec_hash);
+                if !accepted {
+                    tracing::info!(
+                        "found cached outputs with different backend specification, invalidating cache."
+                    );
+                }
+                return accepted;
+            }
+            Self::Skip { .. } => return false,
+            Self::Cache(expected) => expected,
+        };
+        match cached {
+            Some(cached) if cached == expected => true,
+            Some(cached) => {
+                tracing::info!(
+                    "found cached outputs from a different backend ({cached} -> {expected}), invalidating cache."
+                );
+                false
+            }
+            None => {
+                tracing::info!(
+                    "found cached outputs from an unidentified backend, invalidating cache."
+                );
+                false
+            }
         }
+    }
+}
 
-        match &json_rpc_spec.command {
-            CommandSpec::System(SystemCommandSpec { command: Some(cmd) }) => {
-                match which::which(cmd).ok() {
-                    Some(path) => BackendCacheStrategy::Fingerprint(path),
-                    None => BackendCacheStrategy::Skip {
+impl BuildBackendMetadataInner {
+    /// Decide how the metadata cache should treat this backend, identifying
+    /// it through the same pipeline backend instantiation uses, without
+    /// spawning it.
+    async fn cache_strategy(
+        &self,
+        ctx: &mut ComputeCtx,
+        checkouts: &ResolvedCheckouts,
+    ) -> Result<BackendCacheStrategy, BuildBackendMetadataError> {
+        let BackendSpec::JsonRpc(spec) = checkouts
+            .discovered_backend
+            .backend_spec
+            .clone()
+            .resolve(checkouts.manifest_source_anchor.clone());
+        let command = ctx
+            .compute(&ResolvedBackendCommandKey::new(spec.clone()))
+            .await;
+
+        Ok(match command.as_ref() {
+            ResolvedBackendCommand::InMemory(in_mem) => {
+                BackendCacheStrategy::Cache(BackendIdentity::InMemory {
+                    identifier: in_mem.identifier().to_string(),
+                })
+            }
+            ResolvedBackendCommand::Spec(CommandSpec::System(SystemCommandSpec {
+                command: Some(cmd),
+            })) => {
+                let Ok(path) = which::which(cmd) else {
+                    return Ok(BackendCacheStrategy::Skip {
                         reason: "system-unresolved",
-                    },
+                    });
+                };
+                match ctx
+                    .compute(&BackendBinaryFingerprintKey::new(path.clone()))
+                    .await
+                {
+                    Ok(fingerprint) => BackendCacheStrategy::Cache(BackendIdentity::System {
+                        command: cmd.clone(),
+                        fingerprint,
+                    }),
+                    Err(err) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %err,
+                            "failed to fingerprint backend binary, disabling metadata cache"
+                        );
+                        BackendCacheStrategy::Skip {
+                            reason: "system-unfingerprinted",
+                        }
+                    }
                 }
             }
-            CommandSpec::System(SystemCommandSpec { command: None }) => {
-                BackendCacheStrategy::Skip {
-                    reason: "system-no-command",
-                }
-            }
-            CommandSpec::EnvironmentSpec(env_spec) if env_spec.requirement.1.is_mutable() => {
+            ResolvedBackendCommand::Spec(CommandSpec::System(SystemCommandSpec {
+                command: None,
+            })) => BackendCacheStrategy::Skip {
+                reason: "system-no-command",
+            },
+            ResolvedBackendCommand::Spec(CommandSpec::EnvironmentSpec(env_spec))
+                if env_spec.requirement.1.is_mutable() =>
+            {
                 BackendCacheStrategy::Skip {
                     reason: "mutable-environment",
                 }
             }
-            CommandSpec::EnvironmentSpec(_) => BackendCacheStrategy::PackageResolved,
-        }
+            ResolvedBackendCommand::Spec(CommandSpec::EnvironmentSpec(env_spec)) => {
+                match resolve_package_backend(ctx, env_spec, &spec.name, self.exclude_newer.clone())
+                    .await
+                {
+                    Ok(package) => {
+                        BackendCacheStrategy::Cache(BackendIdentity::Package(Box::new(package)))
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            backend = %spec.name,
+                            error = %err,
+                            "could not identify build backend",
+                        );
+                        BackendCacheStrategy::Unidentified {
+                            env_spec: env_spec.clone(),
+                            backend_name: spec.name.clone(),
+                            spec_hash: BackendSpecHash::from(
+                                &checkouts.discovered_backend.backend_spec,
+                            ),
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Verifies if the cached metadata is still fresh.
@@ -325,8 +424,7 @@ impl BuildBackendMetadataInner {
         build_source_checkout: &SourceCheckout,
         project_model_hash: Option<ProjectModelHash>,
         configuration_hash: ConfigurationHash,
-        backend_spec_hash: BackendSpecHash,
-        backend_binary_fingerprint: Option<BackendBinaryFingerprint>,
+        strategy: &BackendCacheStrategy,
         requested_variants: &BTreeMap<String, Vec<VariantValue>>,
     ) -> Result<CacheFreshness, BuildBackendMetadataError> {
         let Some(mut cache_entry) = cache_entry else {
@@ -349,24 +447,10 @@ impl BuildBackendMetadataInner {
             return Ok(CacheFreshness::Stale(Some(cache_entry)));
         }
 
-        // Check the backend spec. Entries written before this field existed
-        // have `None`; treat them as stale so they get repopulated with a
-        // recorded spec hash.
-        if cache_entry.backend_spec_hash != Some(backend_spec_hash) {
-            tracing::info!(
-                "found cached outputs with different backend specification, invalidating cache."
-            );
-            return Ok(CacheFreshness::Stale(Some(cache_entry)));
-        }
-
-        // Check the backend binary fingerprint. Both sides are `None` for
-        // package-resolved backends (where the spec hash already captures
-        // identity); `Some` for system / path-based backends, where the
-        // binary on disk can change without any spec change.
-        if cache_entry.backend_binary_fingerprint != backend_binary_fingerprint {
-            tracing::info!(
-                "found cached outputs with different backend binary fingerprint, invalidating cache."
-            );
+        if !strategy.accepts(
+            cache_entry.backend_identity.as_ref(),
+            cache_entry.backend_spec_hash,
+        ) {
             return Ok(CacheFreshness::Stale(Some(cache_entry)));
         }
 
@@ -721,9 +805,7 @@ enum CacheProbe {
         stale: Option<CacheEntry<BuildBackendMetadataCache>>,
         project_model_hash: Option<ProjectModelHash>,
         configuration_hash: ConfigurationHash,
-        backend_spec_hash: BackendSpecHash,
-        backend_binary_fingerprint: Option<BackendBinaryFingerprint>,
-        skip_cache: bool,
+        strategy: BackendCacheStrategy,
     },
 }
 
@@ -824,45 +906,7 @@ impl BuildBackendMetadataInner {
         checkouts: &ResolvedCheckouts,
     ) -> Result<CacheProbe, BuildBackendMetadataError> {
         let enabled_protocols = ctx.compute(&EnabledProtocolsKey).await;
-        let backend_override = ctx.compute(&BackendOverrideKey).await;
-        let strategy = Self::cache_strategy(
-            &checkouts.discovered_backend.backend_spec,
-            &backend_override,
-        );
-
-        // Resolve the strategy into `(skip_cache, fingerprint)`. The
-        // `Fingerprint` arm goes through the compute engine so the
-        // binary is hashed at most once per process per path; a failure
-        // there falls back to skipping the cache rather than erroring
-        // the whole solve.
-        let (skip_cache, backend_binary_fingerprint) = match strategy {
-            BackendCacheStrategy::PackageResolved => (false, None),
-            BackendCacheStrategy::Fingerprint(path) => {
-                match ctx
-                    .compute(&BackendBinaryFingerprintKey::new(path.clone()))
-                    .await
-                {
-                    Ok(fp) => (false, Some(fp)),
-                    Err(err) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %err,
-                            "failed to fingerprint backend binary, disabling metadata cache"
-                        );
-                        (true, None)
-                    }
-                }
-            }
-            BackendCacheStrategy::Skip { reason } => {
-                let BackendSpec::JsonRpc(spec) = &checkouts.discovered_backend.backend_spec;
-                tracing::debug!(
-                    backend = %spec.name,
-                    reason,
-                    "metadata cache disabled for backend",
-                );
-                (true, None)
-            }
-        };
+        let strategy = self.cache_strategy(ctx, checkouts).await?;
 
         let manifest_source_location = checkouts.manifest_source_location();
         let cache_key: CacheKey<BuildBackendMetadataCache> = BuildBackendMetadataCacheKey {
@@ -905,19 +949,20 @@ impl BuildBackendMetadataInner {
                 .target_configuration
                 .as_ref(),
         );
-        let backend_spec_hash = BackendSpecHash::from(&checkouts.discovered_backend.backend_spec);
-
-        if skip_cache {
-            let BackendSpec::JsonRpc(spec) = &checkouts.discovered_backend.backend_spec;
-            warn_once_per_backend(&spec.name);
+        let BackendSpec::JsonRpc(spec) = &checkouts.discovered_backend.backend_spec;
+        if let BackendCacheStrategy::Skip { reason } = &strategy {
+            tracing::debug!(
+                backend = %spec.name,
+                reason,
+                "metadata cache disabled for backend",
+            );
+            warn_once_per_backend(&spec.name, BackendWarning::CacheDisabled);
             return Ok(CacheProbe::Miss {
                 cache_key,
                 stale: None,
                 project_model_hash,
                 configuration_hash,
-                backend_spec_hash,
-                backend_binary_fingerprint,
-                skip_cache,
+                strategy,
             });
         }
 
@@ -927,21 +972,18 @@ impl BuildBackendMetadataInner {
             &checkouts.build_source_checkout,
             project_model_hash,
             configuration_hash,
-            backend_spec_hash,
-            backend_binary_fingerprint,
+            &strategy,
             &self.variant_configuration,
         )
         .await?
         {
-            CacheFreshness::Fresh(fresh) => {
-                tracing::debug!("Using cached build backend metadata");
-                Ok(CacheProbe::Hit(BuildBackendMetadata {
-                    source: manifest_source_location,
-                    cache_key: cache_key.key(),
-                    metadata: fresh,
-                    skip_cache,
-                }))
-            }
+            CacheFreshness::Fresh(fresh) => Ok(Self::cache_hit(
+                spec,
+                &strategy,
+                manifest_source_location,
+                &cache_key,
+                fresh,
+            )),
             CacheFreshness::Refreshed(fresh) => {
                 // Keeps the version unchanged so a concurrent rebuild does
                 // not lose the version CAS to this read path.
@@ -967,24 +1009,41 @@ impl BuildBackendMetadataInner {
                     }
                 }
 
-                tracing::debug!("Using cached build backend metadata");
-                Ok(CacheProbe::Hit(BuildBackendMetadata {
-                    source: manifest_source_location,
-                    cache_key: cache_key.key(),
-                    metadata: fresh,
-                    skip_cache,
-                }))
+                Ok(Self::cache_hit(
+                    spec,
+                    &strategy,
+                    manifest_source_location,
+                    &cache_key,
+                    fresh,
+                ))
             }
             CacheFreshness::Stale(stale) => Ok(CacheProbe::Miss {
                 cache_key,
                 stale,
                 project_model_hash,
                 configuration_hash,
-                backend_spec_hash,
-                backend_binary_fingerprint,
-                skip_cache,
+                strategy,
             }),
         }
+    }
+
+    fn cache_hit(
+        spec: &JsonRpcBackendSpec,
+        strategy: &BackendCacheStrategy,
+        source: PinnedSourceCodeLocation,
+        cache_key: &CacheKey<BuildBackendMetadataCache>,
+        metadata: CacheEntry<BuildBackendMetadataCache>,
+    ) -> CacheProbe {
+        if let BackendCacheStrategy::Unidentified { .. } = strategy {
+            warn_once_per_backend(&spec.name, BackendWarning::Unidentified);
+        }
+        tracing::debug!("Using cached build backend metadata");
+        CacheProbe::Hit(BuildBackendMetadata {
+            source,
+            cache_key: cache_key.key(),
+            metadata,
+            skip_cache: false,
+        })
     }
 
     /// Orchestrates the four phases of producing
@@ -997,34 +1056,23 @@ impl BuildBackendMetadataInner {
     ) -> Result<BuildBackendMetadata, BuildBackendMetadataError> {
         let checkouts = self.resolve_checkouts(ctx).await?;
 
-        let (
-            cache_key,
-            stale,
-            project_model_hash,
-            configuration_hash,
-            backend_spec_hash,
-            backend_binary_fingerprint,
-            skip_cache,
-        ) = match self.probe_cache(ctx, &checkouts).await? {
-            CacheProbe::Hit(metadata) => return Ok(metadata),
-            CacheProbe::Miss {
-                cache_key,
-                stale,
-                project_model_hash,
-                configuration_hash,
-                backend_spec_hash,
-                backend_binary_fingerprint,
-                skip_cache,
-            } => (
-                cache_key,
-                stale,
-                project_model_hash,
-                configuration_hash,
-                backend_spec_hash,
-                backend_binary_fingerprint,
-                skip_cache,
-            ),
-        };
+        let (cache_key, stale, project_model_hash, configuration_hash, strategy) =
+            match self.probe_cache(ctx, &checkouts).await? {
+                CacheProbe::Hit(metadata) => return Ok(metadata),
+                CacheProbe::Miss {
+                    cache_key,
+                    stale,
+                    project_model_hash,
+                    configuration_hash,
+                    strategy,
+                } => (
+                    cache_key,
+                    stale,
+                    project_model_hash,
+                    configuration_hash,
+                    strategy,
+                ),
+            };
 
         // Instantiate the backend. `DiscoveredBackendKey` dedups inside
         // the key, so the re-discovery is free.
@@ -1045,9 +1093,27 @@ impl BuildBackendMetadataInner {
                 .with_inline(self.inline.clone()),
             )
             .await
-            .map_err(|e: Arc<InstantiateBackendError>| {
-                BuildBackendMetadataError::Initialize((*e).clone())
-            })?;
+            .map_err(initialize_error)?;
+
+        let (backend_identity, skip_cache) = match strategy {
+            BackendCacheStrategy::Cache(identity) => (Some(identity), false),
+            BackendCacheStrategy::Unidentified {
+                env_spec,
+                backend_name,
+                ..
+            } => {
+                let package = resolve_package_backend(
+                    ctx,
+                    &env_spec,
+                    &backend_name,
+                    self.exclude_newer.clone(),
+                )
+                .await
+                .map_err(initialize_error)?;
+                (Some(BackendIdentity::Package(Box::new(package))), false)
+            }
+            BackendCacheStrategy::Skip { .. } => (None, true),
+        };
 
         {
             let guard = backend.lock().await;
@@ -1133,8 +1199,10 @@ impl BuildBackendMetadataInner {
             source: canonical_source,
             project_model_hash,
             configuration_hash,
-            backend_spec_hash: Some(backend_spec_hash),
-            backend_binary_fingerprint,
+            backend_spec_hash: Some(BackendSpecHash::from(
+                &checkouts.discovered_backend.backend_spec,
+            )),
+            backend_identity,
             timestamp: raw.timestamp,
         };
 
@@ -1161,6 +1229,10 @@ impl BuildBackendMetadataInner {
             skip_cache,
         })
     }
+}
+
+fn initialize_error(error: Arc<InstantiateBackendError>) -> BuildBackendMetadataError {
+    BuildBackendMetadataError::Initialize((*error).clone())
 }
 
 /// Raw result from calling the build backend's `conda/outputs` procedure.
@@ -1440,6 +1512,122 @@ mod tests {
         assert!(
             result.is_err(),
             "Expected validation to fail for duplicate multi-key variants"
+        );
+    }
+
+    fn package_identity(version: &str) -> BackendIdentity {
+        BackendIdentity::Package(Box::new(crate::PackageBackend {
+            command: "pixi-build-ros".to_string(),
+            name: PackageName::try_from("pixi-build-ros").unwrap(),
+            version: version.parse().unwrap(),
+            build: "h0_0".to_string(),
+            env_digest: crate::EnvDigest::from_records(&[]),
+        }))
+    }
+
+    fn unidentified_strategy() -> BackendCacheStrategy {
+        BackendCacheStrategy::Unidentified {
+            env_spec: Box::new(EnvironmentSpec {
+                requirement: (
+                    PackageName::try_from("pixi-build-ros").unwrap(),
+                    Default::default(),
+                ),
+                additional_requirements: Default::default(),
+                constraints: Default::default(),
+                channels: Vec::new(),
+                command: None,
+            }),
+            backend_name: "pixi-build-ros".to_string(),
+            spec_hash: spec_hash(1),
+        }
+    }
+
+    fn spec_hash(value: u64) -> BackendSpecHash {
+        serde_json::from_value(value.into()).unwrap()
+    }
+
+    fn cache_entry_json(backend_identity: Option<&BackendIdentity>) -> serde_json::Value {
+        let entry = BuildBackendMetadataCacheEntry {
+            revision: CacheRevision::new(),
+            cache_version: 1,
+            project_model_hash: None,
+            configuration_hash: ConfigurationHash::default(),
+            backend_spec_hash: None,
+            backend_identity: backend_identity.cloned(),
+            source: CanonicalSourceCodeLocation::new(
+                PinnedSourceSpec::Path(pixi_record::PinnedPathSpec {
+                    path: "/src".into(),
+                })
+                .into(),
+                None,
+            ),
+            build_variants: BTreeMap::new(),
+            build_variant_files: Default::default(),
+            input_glob_sets: Vec::new(),
+            input_files: Default::default(),
+            input_file_states: InputSnapshot::default(),
+            timestamp: SystemTime::UNIX_EPOCH,
+            outputs: Vec::new(),
+        };
+        serde_json::to_value(entry).unwrap()
+    }
+
+    #[test]
+    fn cached_outputs_from_a_different_backend_are_stale() {
+        let strategy = BackendCacheStrategy::Cache(package_identity("0.8.1"));
+        assert!(!strategy.accepts(Some(&package_identity("0.5.0")), None));
+    }
+
+    #[test]
+    fn cached_outputs_from_the_same_backend_are_fresh() {
+        let strategy = BackendCacheStrategy::Cache(package_identity("0.8.1"));
+        assert!(strategy.accepts(Some(&package_identity("0.8.1")), None));
+    }
+
+    #[test]
+    fn unidentified_backend_trusts_cached_outputs_for_the_same_spec() {
+        let strategy = unidentified_strategy();
+        assert!(strategy.accepts(Some(&package_identity("0.5.0")), Some(spec_hash(1))));
+        assert!(strategy.accepts(None, Some(spec_hash(1))));
+    }
+
+    #[test]
+    fn unidentified_backend_rejects_cached_outputs_for_another_spec() {
+        let strategy = unidentified_strategy();
+        assert!(!strategy.accepts(Some(&package_identity("0.5.0")), Some(spec_hash(2))));
+        assert!(!strategy.accepts(Some(&package_identity("0.5.0")), None));
+    }
+
+    #[test]
+    fn legacy_cache_entry_deserializes_as_stale() {
+        let mut json = cache_entry_json(None);
+        let object = json.as_object_mut().unwrap();
+        object.insert("backend_spec_hash".to_string(), 42.into());
+        object.insert("backend_binary_fingerprint".to_string(), 7.into());
+
+        let entry: BuildBackendMetadataCacheEntry = serde_json::from_value(json).unwrap();
+
+        assert_eq!(entry.backend_identity, None);
+        let strategy = BackendCacheStrategy::Cache(package_identity("0.8.1"));
+        assert!(!strategy.accepts(entry.backend_identity.as_ref(), entry.backend_spec_hash));
+    }
+
+    #[test]
+    fn backend_identity_round_trips_through_the_cache_entry() {
+        let identity = BackendIdentity::System {
+            command: "pixi-build-ros".to_string(),
+            fingerprint: crate::input_hash::BackendBinaryFingerprint::new(7),
+        };
+        let entry: BuildBackendMetadataCacheEntry =
+            serde_json::from_value(cache_entry_json(Some(&identity))).unwrap();
+        assert_eq!(entry.backend_identity, Some(identity));
+    }
+
+    #[test]
+    fn package_identity_displays_name_version_and_build() {
+        assert_eq!(
+            package_identity("0.8.1").to_string(),
+            "pixi-build-ros 0.8.1 h0_0"
         );
     }
 }

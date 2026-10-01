@@ -2473,6 +2473,87 @@ pub async fn test_metadata_not_refetched_when_no_files_changed() {
     );
 }
 
+/// A passthrough backend reporting a caller-chosen identifier, standing in
+/// for two releases of the same backend.
+struct IdentifiedPassthrough(&'static str);
+
+impl pixi_build_frontend::in_memory::InMemoryBackendInstantiator for IdentifiedPassthrough {
+    type Backend = PassthroughBackend;
+
+    fn initialize(
+        &self,
+        params: pixi_build_types::procedures::initialize::InitializeParams,
+    ) -> Result<Self::Backend, Box<pixi_build_frontend::json_rpc::CommunicationError>> {
+        PassthroughBackend::instantiator().initialize(params)
+    }
+
+    fn identifier(&self) -> &str {
+        self.0
+    }
+}
+
+#[tokio::test]
+pub async fn test_metadata_refetched_when_backend_changes() {
+    use pixi_command_dispatcher::{BuildBackendMetadataSpec, DevSourceMetadataSpec};
+    use pixi_record::PinnedPathSpec;
+
+    let root_dir = workspaces_dir().join("dev-sources");
+    let tempdir = test_tempdir();
+    let (tool_platform, tool_virtual_packages) = tool_platform();
+
+    let spec = DevSourceMetadataSpec {
+        package_name: PackageName::new_unchecked("test-package"),
+        backend_metadata: BuildBackendMetadataSpec {
+            manifest_source: PinnedPathSpec {
+                path: "test-package".into(),
+            }
+            .into(),
+            preferred_build_source: None,
+            env_ref: env_ref_of(
+                vec![],
+                BuildEnvironment::simple(tool_platform, tool_virtual_packages.clone()),
+            ),
+            build_string_prefix: None,
+            build_number: None,
+            inline: None,
+        },
+    };
+
+    let backend_instantiations = async |backend: &'static str| {
+        let (reporter, events, _registry) = EventReporter::new();
+        let dispatcher = CommandDispatcher::builder()
+            .with_root_dir(to_abs_dir(root_dir.clone()))
+            .with_cache_dirs(default_cache_dirs().with_workspace(to_abs_dir(tempdir.path())))
+            .with_executor(Executor::Serial)
+            .with_tool_platform(tool_platform, tool_virtual_packages.clone())
+            .with_backend_overrides(BackendOverride::from_memory(IdentifiedPassthrough(backend)))
+            .with_event_reporter(reporter)
+            .finish();
+        dispatcher
+            .dev_source_metadata(spec.clone())
+            .await
+            .map_err(|e| format_diagnostic(&e))
+            .expect("metadata request should succeed");
+        events
+            .take()
+            .iter()
+            .filter(|event| matches!(event, Event::InstantiateBackendQueued { .. }))
+            .count()
+    };
+
+    assert_eq!(backend_instantiations("backend-v1").await, 1);
+    assert_eq!(
+        backend_instantiations("backend-v1").await,
+        0,
+        "metadata from the same backend should be served from the cache"
+    );
+    assert_eq!(
+        backend_instantiations("backend-v2").await,
+        1,
+        "metadata cached by a different backend should be refetched"
+    );
+}
+
 /// Tests that metadata IS re-fetched when a source file is modified.
 ///
 /// This is a focused test that verifies metadata cache invalidation on file changes.
