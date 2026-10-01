@@ -7,7 +7,7 @@ use std::{
 };
 
 use dashmap::DashMap;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use itertools::{Either, Itertools};
 use once_cell::sync::OnceCell;
 use pixi_command_dispatcher::{
@@ -36,7 +36,7 @@ use rattler_conda_types::{
 use rattler_lock::{LockedPackage, UrlOrPath};
 use uv_distribution_types::{RequirementSource, RequiresPython};
 
-use super::errors::{LocalMetadataMismatch, PlatformUnsat, SolveGroupUnsat};
+use super::errors::{LocalMetadataMismatch, PlatformUnsat, SolveGroupUnsat, VerifyError};
 use super::legacy;
 use super::pypi::{lock_pypi_packages, pypi_satisfies_editable, pypi_satisfies_requirement};
 use super::pypi_metadata;
@@ -75,8 +75,12 @@ pub struct VerifySatisfiabilityContext<'a> {
 
 pub type PlatformSatisfiabilityResult = Result<
     (VerifiedIndividualEnvironment, LockedPypiRecordsByName),
-    CommandDispatcherError<Box<PlatformUnsat>>,
+    CommandDispatcherError<VerifyError>,
 >;
+
+pub(super) fn failed(unsat: impl Into<VerifyError>) -> CommandDispatcherError<VerifyError> {
+    CommandDispatcherError::Failed(unsat.into())
+}
 
 /// Look up the lock entry for `platform`, falling back to the bare conda subdir
 /// when the lock keys the row by subdir (`osx-arm64`) rather than the rich
@@ -157,6 +161,122 @@ fn build_platform_verification_setup(
     })
 }
 
+/// Rejects locked source records the environment no longer asks for, using
+/// only the lock and the manifest.
+///
+/// A direct source dependency must match the location its locked record was
+/// built from. Mutable or partial records must be reachable from the
+/// environment's dependencies through the locked dependency graph. Dependencies
+/// are followed by name alone, so reachability is over-approximated and some
+/// unreachable records go unreported. Dev dependencies reach records through
+/// backend metadata the lock does not hold, so reachability is skipped when
+/// there are any.
+fn verify_locked_sources_still_requested(
+    ctx: &VerifySatisfiabilityContext<'_>,
+    records: &[UnresolvedPixiRecord],
+) -> Result<(), Box<PlatformUnsat>> {
+    let pixi_platform = ctx
+        .environment
+        .workspace_manifest()
+        .workspace
+        .platform_by_name(&ctx.platform);
+
+    let mut by_name: HashMap<&PackageName, Vec<&UnresolvedPixiRecord>> = HashMap::new();
+    for record in records {
+        by_name.entry(record.name()).or_default().push(record);
+    }
+
+    let mut stack: Vec<PackageName> = Vec::new();
+    for (name, spec) in ctx
+        .environment
+        .combined_dependencies(pixi_platform)
+        .into_specs()
+    {
+        if let Either::Left(source_spec) = spec.into_source_or_binary()
+            && source_spec.matchspec.condition.is_none()
+            && let Some(locked) = by_name
+                .get(&name)
+                .into_iter()
+                .flatten()
+                .find_map(|record| record.as_source())
+        {
+            locked
+                .manifest_source
+                .satisfies(&source_spec)
+                .map_err(|e| {
+                    PlatformUnsat::SourcePackageMismatch(name.as_source().to_string(), e)
+                })?;
+        }
+        stack.push(name);
+    }
+
+    if !ctx
+        .environment
+        .combined_dev_dependencies(pixi_platform)
+        .is_empty()
+    {
+        return Ok(());
+    }
+    if ctx.environment.has_pypi_dependencies() {
+        stack.extend(
+            records
+                .iter()
+                .filter(|record| provides_pypi_packages(record))
+                .map(|record| record.name().clone()),
+        );
+    }
+
+    let mut reached: HashSet<PackageName> = HashSet::new();
+    while let Some(name) = stack.pop() {
+        if !reached.insert(name.clone()) {
+            continue;
+        }
+        for record in by_name.get(&name).into_iter().flatten() {
+            let extra_depends = match record {
+                UnresolvedPixiRecord::Binary(binary) => &binary.package_record.extra_depends,
+                UnresolvedPixiRecord::Source(source) => source.experimental_extra_depends(),
+            };
+            for depends in record
+                .depends()
+                .iter()
+                .chain(extra_depends.values().flatten())
+            {
+                let Ok(spec) = MatchSpec::from_str(
+                    depends,
+                    ParseMatchSpecOptions::lenient().with_repodata_revision(RepodataRevision::V3),
+                ) else {
+                    return Ok(());
+                };
+                stack.extend(spec.name.as_exact().cloned());
+            }
+        }
+    }
+
+    let unrequired: Vec<PackageName> = records
+        .iter()
+        .filter_map(UnresolvedPixiRecord::as_source)
+        .filter(|source| source.data.is_partial() || source.has_mutable_source())
+        .filter(|source| !reached.contains(source.name()))
+        .map(|source| source.name().clone())
+        .collect();
+    if unrequired.is_empty() {
+        Ok(())
+    } else {
+        Err(Box::new(PlatformUnsat::TooManyCondaPackages(unrequired)))
+    }
+}
+
+fn provides_pypi_packages(record: &UnresolvedPixiRecord) -> bool {
+    let purls = match record {
+        UnresolvedPixiRecord::Binary(binary) => &binary.package_record.purls,
+        UnresolvedPixiRecord::Source(source) => match &source.data {
+            SourceRecordData::Full(full) => &full.package_record.purls,
+            SourceRecordData::Partial(partial) => &partial.purls,
+        },
+    };
+    purls.as_ref().is_some_and(|purls| !purls.is_empty())
+}
+
 /// Verifies that the package requirements of the specified `environment` can be
 /// satisfied with the packages present in the lock file.
 ///
@@ -174,12 +294,7 @@ pub async fn verify_platform_satisfiability(
     ctx: &VerifySatisfiabilityContext<'_>,
     locked_environment: rattler_lock::Environment<'_>,
 ) -> PlatformSatisfiabilityResult {
-    let platform_setup = match build_platform_verification_setup(ctx) {
-        Ok(setup) => setup,
-        Err(err) => {
-            return Err(err);
-        }
-    };
+    let platform_setup = build_platform_verification_setup(ctx).map_err_with(VerifyError::from)?;
 
     // Convert the lock file into a list of conda and pypi packages.
     // Read as UnresolvedPixiRecord first, then resolve any partial source records.
@@ -222,12 +337,9 @@ pub async fn verify_platform_satisfiability(
         &platform_setup.workspace_env_ref,
     )
     .await
-    .map_err(|err| match err {
-        CommandDispatcherError::Cancelled => CommandDispatcherError::Cancelled,
-        CommandDispatcherError::Failed(err) => CommandDispatcherError::Failed(Box::new(
-            PlatformUnsat::LegacySourceEnvReify(err.to_string()),
-        )),
-    })?;
+    .map_err_with(|err| VerifyError::from(PlatformUnsat::LegacySourceEnvReify(err.to_string())))?;
+
+    verify_locked_sources_still_requested(ctx, &unresolved_records).map_err(failed)?;
 
     // Resolve every unresolved source record into a fully-resolved
     // [`PixiRecord::Source`].
@@ -309,7 +421,7 @@ pub async fn verify_platform_satisfiability(
                                 .get(record.name())
                                 .map(|inline| inline.content_hash.as_u64()),
                         )
-                        .map_err(CommandDispatcherError::Failed)?;
+                        .map_err(failed)?;
                         let full_record =
                             Arc::unwrap_or_clone(record).try_map_data(|data| match data {
                                 SourceRecordData::Full(data) => Ok(data),
@@ -324,11 +436,24 @@ pub async fn verify_platform_satisfiability(
                     }
                 }
             };
-            Ok::<_, CommandDispatcherError<Box<PlatformUnsat>>>((index, resolved))
+            Ok::<_, CommandDispatcherError<VerifyError>>((index, resolved))
         });
     }
 
-    let mut indexed_records: Vec<(usize, PixiRecord)> = resolve_futures.try_collect().await?;
+    let mut indexed_records: Vec<(usize, PixiRecord)> = Vec::new();
+    let mut unverifiable = None;
+    while let Some(result) = resolve_futures.next().await {
+        match result {
+            Ok(record) => indexed_records.push(record),
+            Err(CommandDispatcherError::Failed(err @ VerifyError::Unverifiable(_))) => {
+                unverifiable.get_or_insert(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    if let Some(err) = unverifiable {
+        return Err(failed(err));
+    }
     indexed_records.sort_by_key(|(index, _)| *index);
     let resolved_records: Vec<PixiRecord> = indexed_records
         .into_iter()
@@ -348,14 +473,12 @@ pub async fn verify_platform_satisfiability(
                 .filter_map(PixiRecord::as_binary)
                 .all(|record| record.package_record.purls.is_none())
         {
-            return Err(CommandDispatcherError::Failed(Box::new(
-                PlatformUnsat::MissingPurls,
-            )));
+            return Err(failed(Box::new(PlatformUnsat::MissingPurls)));
         }
 
         let pixi_records_by_name = PixiRecordsByName::from_unique_iter(resolved_records.clone())
             .map_err(|duplicate| {
-                CommandDispatcherError::Failed(Box::new(PlatformUnsat::DuplicateEntry(
+                failed(Box::new(PlatformUnsat::DuplicateEntry(
                     duplicate.package_record().name.as_source().to_string(),
                 )))
             })?;
@@ -364,7 +487,7 @@ pub async fn verify_platform_satisfiability(
         // if we find a duplicate entry for a record
         let pypi_records_by_name =
             PypiRecordsByName::from_unique_iter(pypi_packages).map_err(|duplicate| {
-                CommandDispatcherError::Failed(Box::new(PlatformUnsat::DuplicateEntry(
+                failed(Box::new(PlatformUnsat::DuplicateEntry(
                     duplicate.name().to_string(),
                 )))
             })?;
@@ -481,7 +604,7 @@ pub async fn resolve_dev_dependencies(
     command_dispatcher: &CommandDispatcher,
     channel_config: &rattler_conda_types::ChannelConfig,
     workspace_env_ref: WorkspaceEnvRef,
-) -> Result<Vec<Dependency>, CommandDispatcherError<Box<PlatformUnsat>>> {
+) -> Result<Vec<Dependency>, CommandDispatcherError<VerifyError>> {
     // Collect all dev source package names to filter out interdependencies
     let dev_source_names: HashSet<PackageName> = dev_dependencies
         .iter()
@@ -515,7 +638,6 @@ pub async fn resolve_dev_dependencies(
             },
         )
         .await
-        .map_err_with(Box::new)
 }
 
 /// Resolves all dependencies of a single dev dependency
@@ -526,12 +648,12 @@ async fn resolve_single_dev_dependency(
     channel_config: rattler_conda_types::ChannelConfig,
     workspace_env_ref: WorkspaceEnvRef,
     dev_source_names: HashSet<PackageName>,
-) -> Result<Vec<Dependency>, CommandDispatcherError<PlatformUnsat>> {
+) -> Result<Vec<Dependency>, CommandDispatcherError<VerifyError>> {
     let pinned_source = command_dispatcher
         .engine()
         .with_ctx(async |ctx| ctx.pin_and_checkout(source_spec).await)
         .await
-        .map_err_into_dispatcher(PlatformUnsat::from)?;
+        .map_err_into_dispatcher(VerifyError::from)?;
 
     // Create the spec for getting dev source metadata
     let spec = DevSourceMetadataSpec {
@@ -549,7 +671,7 @@ async fn resolve_single_dev_dependency(
     let dev_metadata = command_dispatcher
         .dev_source_metadata(spec)
         .await
-        .map_err_with(PlatformUnsat::from)?;
+        .map_err_with(VerifyError::from)?;
 
     let dev_deps = DevSourceRecord::dev_source_dependencies(&dev_metadata.records);
 
@@ -581,7 +703,7 @@ async fn resolve_single_dev_dependency(
         let nameless_spec = binary_spec
             .try_into_nameless_match_spec(&channel_config)
             .map_err(|e| {
-                CommandDispatcherError::Failed(PlatformUnsat::FailedToParseMatchSpec(
+                failed(PlatformUnsat::FailedToParseMatchSpec(
                     dep_name.as_source().to_string(),
                     spec_conversion_to_match_spec_error(e),
                 ))
@@ -625,7 +747,7 @@ async fn verify_package_platform_satisfiability(
     locked_pypi_indexes: Option<&rattler_lock::PypiIndexes>,
 ) -> Result<
     (VerifiedIndividualEnvironment, LockedPypiRecordsByName),
-    CommandDispatcherError<Box<PlatformUnsat>>,
+    CommandDispatcherError<VerifyError>,
 > {
     let pixi_platform = ctx
         .environment
@@ -672,7 +794,7 @@ async fn verify_package_platform_satisfiability(
             Ok((uv_req.name.clone(), uv_req))
         })
         .collect::<Result<indexmap::IndexMap<_, _>, _>>()
-        .map_err(CommandDispatcherError::Failed)?;
+        .map_err(failed)?;
 
     // Find the python interpreter from the list of conda packages. Note that this
     // refers to the locked python interpreter, it might not match the specs
@@ -699,7 +821,7 @@ async fn verify_package_platform_satisfiability(
     let marker_environment = match marker_environment {
         Err(err) => {
             if !pypi_dependencies.is_empty() {
-                return Err(CommandDispatcherError::Failed(err));
+                return Err(failed(err));
             } else {
                 None
             }
@@ -729,14 +851,12 @@ async fn verify_package_platform_satisfiability(
                 })
         })
         .collect::<Result<Vec<_>, _>>()
-        .map_err(CommandDispatcherError::Failed)?;
+        .map_err(failed)?;
 
     if pypi_requirements.is_empty() && !unresolved_pypi_environment.is_empty() {
-        return Err(CommandDispatcherError::Failed(Box::new(
-            PlatformUnsat::TooManyPypiPackages(
-                unresolved_pypi_environment.names().cloned().collect(),
-            ),
-        )));
+        return Err(failed(Box::new(PlatformUnsat::TooManyPypiPackages(
+            unresolved_pypi_environment.names().cloned().collect(),
+        ))));
     }
 
     let virtual_packages = platform_setup
@@ -758,7 +878,7 @@ async fn verify_package_platform_satisfiability(
         // Source specs are not valid in [constraints]; raise an error.
         let binary_spec = match pixi_spec.into_source_or_binary() {
             Either::Left(_) => {
-                return Err(CommandDispatcherError::Failed(Box::new(
+                return Err(failed(Box::new(
                     PlatformUnsat::SourceConstraintNotSupported(
                         package_name.as_source().to_string(),
                     ),
@@ -769,7 +889,7 @@ async fn verify_package_platform_satisfiability(
         let nameless_spec = binary_spec
             .try_into_nameless_match_spec(&channel_config)
             .map_err(|e| {
-                CommandDispatcherError::Failed(failed_to_parse_match_spec_unsat(
+                failed(failed_to_parse_match_spec_unsat(
                     package_name.as_source(),
                     spec_conversion_to_match_spec_error(e),
                 ))
@@ -781,13 +901,11 @@ async fn verify_package_platform_satisfiability(
             && let Some(binary_record) = locked_record.as_binary()
             && !nameless_spec.matches(&binary_record.package_record)
         {
-            return Err(CommandDispatcherError::Failed(Box::new(
-                PlatformUnsat::ConstraintViolated {
-                    package: package_name.as_source().to_string(),
-                    locked_version: binary_record.package_record.version.to_string(),
-                    constraint: nameless_spec.to_string(),
-                },
-            )));
+            return Err(failed(Box::new(PlatformUnsat::ConstraintViolated {
+                package: package_name.as_source().to_string(),
+                locked_version: binary_record.package_record.version.to_string(),
+                constraint: nameless_spec.to_string(),
+            })));
         }
     }
 
@@ -801,23 +919,27 @@ async fn verify_package_platform_satisfiability(
     // Determine the pypi packages provided by the locked conda packages.
     let locked_conda_pypi_packages = locked_pixi_records
         .by_pypi_name()
-        .map_err(|e| CommandDispatcherError::Failed(Box::new(e.into())))?;
+        .map_err(|e| failed(Box::new(e.into())))?;
 
-    let lock_pypi_packages_future = lock_pypi_packages(
-        ctx,
-        locked_pixi_records,
-        unresolved_pypi_environment,
-        building_pixi_records,
-    );
+    let lock_pypi_packages_future = async {
+        lock_pypi_packages(
+            ctx,
+            locked_pixi_records,
+            unresolved_pypi_environment,
+            building_pixi_records,
+        )
+        .await
+        .map_err_with(VerifyError::from)
+    };
     let (resolved_dev_dependencies, locked_pypi_records) =
         futures::try_join!(resolve_dev_dependencies_future, lock_pypi_packages_future)?;
 
     if (environment_dependencies.is_empty() && resolved_dev_dependencies.is_empty())
         && !locked_pixi_records.is_empty()
     {
-        return Err(CommandDispatcherError::Failed(Box::new(
-            PlatformUnsat::TooManyCondaPackages(Vec::new()),
-        )));
+        return Err(failed(Box::new(PlatformUnsat::TooManyCondaPackages(
+            Vec::new(),
+        ))));
     }
 
     // Keep a list of all conda packages that we have already visited
@@ -869,14 +991,14 @@ async fn verify_package_platform_satisfiability(
                             source_spec,
                             source,
                         )
-                        .map_err(CommandDispatcherError::Failed)?;
+                        .map_err(failed)?;
                         (found_package, extras)
                     }
                     Either::Right(binary_spec) => {
                         let spec = binary_spec
                             .try_into_nameless_match_spec(&channel_config)
                             .map_err(|e| {
-                                CommandDispatcherError::Failed(failed_to_parse_match_spec_unsat(
+                                failed(failed_to_parse_match_spec_unsat(
                                     name.as_source(),
                                     spec_conversion_to_match_spec_error(e),
                                 ))
@@ -895,7 +1017,7 @@ async fn verify_package_platform_satisfiability(
                             MatchSpec::from_nameless(spec, name.into()),
                             source,
                         )
-                        .map_err(CommandDispatcherError::Failed)?
+                        .map_err(failed)?
                         {
                             Some(pkg) => (pkg, extras),
                             None => continue,
@@ -910,7 +1032,7 @@ async fn verify_package_platform_satisfiability(
             Dependency::Conda(spec, source) => {
                 let extras = spec.extras.clone().unwrap_or_default();
                 match find_matching_package(locked_pixi_records, &virtual_packages, spec, source)
-                    .map_err(CommandDispatcherError::Failed)?
+                    .map_err(failed)?
                 {
                     Some(pkg) => {
                         expected_conda_packages
@@ -925,7 +1047,7 @@ async fn verify_package_platform_satisfiability(
                 let extras = source_spec.matchspec.extras.clone().unwrap_or_default();
                 FoundPackage::Conda(
                     find_matching_source_package(locked_pixi_records, name, source_spec, source)
-                        .map_err(CommandDispatcherError::Failed)?,
+                        .map_err(failed)?,
                     extras,
                 )
             }
@@ -967,7 +1089,7 @@ async fn verify_package_platform_satisfiability(
 
                     if !identifier
                         .satisfies(&requirement_to_check)
-                        .map_err(CommandDispatcherError::Failed)?
+                        .map_err(failed)?
                     {
                         // The record does not match the spec, the lock file is inconsistent.
                         delayed_pypi_error.get_or_insert_with(|| {
@@ -1070,9 +1192,10 @@ async fn verify_package_platform_satisfiability(
                             .with_repodata_revision(RepodataRevision::V3),
                     )
                     .map_err(|e| {
-                        CommandDispatcherError::Failed(Box::new(
-                            PlatformUnsat::FailedToParseMatchSpec(depends.clone(), e),
-                        ))
+                        failed(Box::new(PlatformUnsat::FailedToParseMatchSpec(
+                            depends.clone(),
+                            e,
+                        )))
                     })?;
 
                     // Skip a conditional dependency whose `when` condition the
@@ -1134,9 +1257,7 @@ async fn verify_package_platform_satisfiability(
 
                 // If there is no marker environment there is no python version
                 let Some(marker_environment) = marker_environment.as_ref() else {
-                    return Err(CommandDispatcherError::Failed(Box::new(
-                        PlatformUnsat::MissingPythonInterpreter,
-                    )));
+                    return Err(failed(Box::new(PlatformUnsat::MissingPythonInterpreter)));
                 };
 
                 if pypi_packages_visited.insert(idx) {
@@ -1244,21 +1365,19 @@ async fn verify_package_platform_satisfiability(
 
     // Check if all locked packages have also been visited
     if conda_packages_visited.len() != locked_pixi_records.len() {
-        return Err(CommandDispatcherError::Failed(Box::new(
-            PlatformUnsat::TooManyCondaPackages(
-                locked_pixi_records
-                    .names()
-                    .enumerate()
-                    .filter_map(|(idx, name)| {
-                        if conda_packages_visited.contains(&CondaPackageIdx(idx)) {
-                            None
-                        } else {
-                            Some(name.clone())
-                        }
-                    })
-                    .collect(),
-            ),
-        )));
+        return Err(failed(Box::new(PlatformUnsat::TooManyCondaPackages(
+            locked_pixi_records
+                .names()
+                .enumerate()
+                .filter_map(|(idx, name)| {
+                    if conda_packages_visited.contains(&CondaPackageIdx(idx)) {
+                        None
+                    } else {
+                        Some(name.clone())
+                    }
+                })
+                .collect(),
+        ))));
     }
 
     // Check if all records that are source records should actually be source
@@ -1270,34 +1389,32 @@ async fn verify_package_platform_satisfiability(
         .filter_map(PixiRecord::as_source)
     {
         if !expected_conda_source_dependencies.contains(record.name()) {
-            return Err(CommandDispatcherError::Failed(Box::new(
-                PlatformUnsat::RequiredBinaryIsSource(record.name().as_source().to_string()),
-            )));
+            return Err(failed(Box::new(PlatformUnsat::RequiredBinaryIsSource(
+                record.name().as_source().to_string(),
+            ))));
         }
     }
 
     // Now that we checked all conda requirements, check if there were any pypi
     // issues.
     if let Some(err) = delayed_pypi_error {
-        return Err(CommandDispatcherError::Failed(err));
+        return Err(failed(err));
     }
 
     if pypi_packages_visited.len() != locked_pypi_records.len() {
-        return Err(CommandDispatcherError::Failed(Box::new(
-            PlatformUnsat::TooManyPypiPackages(
-                locked_pypi_records
-                    .names()
-                    .enumerate()
-                    .filter_map(|(idx, name)| {
-                        if pypi_packages_visited.contains(&PypiPackageIdx(idx)) {
-                            None
-                        } else {
-                            Some(name.clone())
-                        }
-                    })
-                    .collect(),
-            ),
-        )));
+        return Err(failed(Box::new(PlatformUnsat::TooManyPypiPackages(
+            locked_pypi_records
+                .names()
+                .enumerate()
+                .filter_map(|(idx, name)| {
+                    if pypi_packages_visited.contains(&PypiPackageIdx(idx)) {
+                        None
+                    } else {
+                        Some(name.clone())
+                    }
+                })
+                .collect(),
+        ))));
     }
 
     // Note: Editability is NOT checked here. The lock file always stores
