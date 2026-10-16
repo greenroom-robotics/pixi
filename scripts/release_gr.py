@@ -12,7 +12,8 @@ Steps:
     3. gzip each binary to staging/pixi-<arch>.gz.
     4. Rewrite the default VERSION in install.sh to match, and commit if it moved.
     5. Tag `pixi-gr@<version>` at HEAD and push.
-    6. Create the GitHub release with install.sh + both binaries.
+    6. Create the GitHub release with install.sh, both binaries and the PRs
+       merged since the previous release as notes.
 
 Usage:
     pixi run -e release release-gr [--dry-run] [--version X.Y.Z]
@@ -174,6 +175,7 @@ def main() -> None:
             "--repo", REPO,
             "--title", tag,
             "--notes", notes,
+            "--generate-notes",
             "--latest",
             *[str(a) for a in assets],
         ],
