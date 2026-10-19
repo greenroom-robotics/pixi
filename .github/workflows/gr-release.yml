@@ -31,9 +31,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          target: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+          build-warnings: allow
 
       - uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c # v2
         with:
