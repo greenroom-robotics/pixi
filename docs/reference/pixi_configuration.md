@@ -473,6 +473,9 @@ pixi config set concurrency.builds 4
 
 `concurrency.builds` limits how many source packages are built at the same time. It defaults to `1` because builds are resource heavy.
 
+For PyPI operations, `UV_CONCURRENT_CACHE_READS` limits concurrent HTTP cache reads.
+It defaults to `4` and must be a positive integer.
+
 ### `run-post-link-scripts`
 
 Configure whether pixi should execute `post-link` and `pre-unlink` scripts or not.
@@ -724,6 +727,9 @@ team. You can use it like this:
 
 The GHCR mirror also contains `bioconda` packages. You can search the [available
 packages on Github](https://github.com/orgs/channel-mirrors/packages).
+
+For private OCI registries, credentials configured with
+`pixi auth login <registry-host>` are also used for `oci://` mirrors.
 
 ### Mirrors for PyPi resolving and PyPi package downloading
 

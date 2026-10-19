@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use uv_configuration::initialize_rayon_once;
+use uv_threads::initialize_rayon_once;
 
 /// Number of trailing log lines shown on stderr when a build fails. The full
 /// log is always written to disk.

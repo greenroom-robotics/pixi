@@ -16,7 +16,7 @@ use rattler_build_recipe::stage0::{
     BuildPlan, Conditional, Item, JinjaExpression, NestedItemList, Script, SerializableMatchSpec,
     Value,
 };
-use rattler_conda_types::{ChannelUrl, NoArchType, Platform};
+use rattler_conda_types::{ChannelUrl, NoArchType, Subdir};
 use thiserror::Error;
 
 use crate::build_script::{BuildScriptError, render_build_script};
@@ -142,7 +142,7 @@ pub async fn generate(
     model: &ProjectModel,
     config: &RosBackendConfig,
     manifest_root: PathBuf,
-    _host_platform: Platform,
+    _host_platform: Subdir,
     channels: Vec<ChannelUrl>,
 ) -> miette::Result<GeneratedRecipe> {
     let distro = resolve_distro(config, &channels, model)?;
@@ -305,7 +305,7 @@ pub async fn generate(
     // silently breaks transitive consumption. Fall back to synthesis only when
     // the source carries no package.xml.
     let package_xml_path = manifest_root.join("package.xml");
-    let xml = match std::fs::read_to_string(&package_xml_path) {
+    let xml = match fs_err::read_to_string(&package_xml_path) {
         Ok(content) => override_package_xml_version(&content, model),
         Err(_) => synthesize_package_xml(model, build_type),
     };
@@ -806,7 +806,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -830,7 +830,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -852,7 +852,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -887,7 +887,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -928,7 +928,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -949,7 +949,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -993,7 +993,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -1023,7 +1023,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -1049,7 +1049,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -1073,7 +1073,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -1099,7 +1099,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -1126,7 +1126,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await;
@@ -1153,7 +1153,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await
@@ -1175,7 +1175,7 @@ mod tests {
             &model,
             &cfg,
             PathBuf::from("/tmp/fake"),
-            rattler_conda_types::Platform::Linux64,
+            rattler_conda_types::Subdir::Linux64,
             vec![],
         )
         .await

@@ -1343,7 +1343,7 @@ mod tests {
         CondaOutput, CondaOutputDependencies, CondaOutputIgnoreRunExports, CondaOutputMetadata,
         CondaOutputRunExports,
     };
-    use rattler_conda_types::{NoArchType, PackageName, Platform, Version};
+    use rattler_conda_types::{NoArchType, PackageName, Subdir, Version};
     use std::collections::BTreeMap;
 
     fn create_test_output(name: &str, variant: BTreeMap<String, VariantValue>) -> CondaOutput {
@@ -1353,7 +1353,7 @@ mod tests {
                 version: Version::major(1).into(),
                 build: "0".to_string(),
                 build_number: 0,
-                subdir: Platform::NoArch,
+                subdir: Subdir::NoArch,
                 license: None,
                 license_family: None,
                 flags: Default::default(),
@@ -1520,7 +1520,7 @@ mod tests {
             command: "pixi-build-ros".to_string(),
             name: PackageName::try_from("pixi-build-ros").unwrap(),
             version: version.parse().unwrap(),
-            build: "h0_0".to_string(),
+            build: rattler_conda_types::package::BuildString::new_unchecked("h0_0"),
             env_digest: crate::EnvDigest::from_records(&[]),
         }))
     }

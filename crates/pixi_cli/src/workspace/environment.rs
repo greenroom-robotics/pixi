@@ -81,7 +81,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         // Warning about unused features before the environment they are meant
         // for even exists would be confusing.
         .with_ignore_unused_feature_warnings(matches!(args.command, Command::Add(_)))
-        .locate()?;
+        .locate()
+        .await?;
 
     let workspace_ctx = cli_context(workspace);
 
@@ -90,22 +91,16 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             let envs = workspace_ctx.list_environments().await;
             if list_args.machine_readable {
                 let names = envs.iter().map(|e| e.name().as_str()).join(" ");
-                writeln!(std::io::stdout(), "{names}")
-                    .inspect_err(|e| {
-                        if e.kind() == std::io::ErrorKind::BrokenPipe {
-                            std::process::exit(0);
-                        }
-                    })
+                pixi_utils::io::ignore_broken_pipe(writeln!(std::io::stdout(), "{names}"))
                     .into_diagnostic()?;
                 return Ok(());
             }
-            writeln!(std::io::stdout(), "{}", format_environment_list(&envs))
-                .inspect_err(|e| {
-                    if e.kind() == std::io::ErrorKind::BrokenPipe {
-                        std::process::exit(0);
-                    }
-                })
-                .into_diagnostic()?;
+            pixi_utils::io::ignore_broken_pipe(writeln!(
+                std::io::stdout(),
+                "{}",
+                format_environment_list(&envs)
+            ))
+            .into_diagnostic()?;
         }
         Command::Add(args) => {
             workspace_ctx

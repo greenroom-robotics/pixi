@@ -26,7 +26,7 @@ A more in-depth overview of what is available in the `[package]` part of the man
 --8<-- "docs/source_files/pixi_workspaces/pixi_build/getting_started/pixi.toml:full"
 ```
 
-Under the `[workspace]` section, you can specify properties like the name, channels, and platforms. This is currently an alias for `[project]`.
+Under the `[workspace]` section, you can specify properties like the name, channels, and platforms. `[project]` is still accepted as a deprecated alias for it.
 
 Since the build feature is still in preview, you have to add "pixi-build" to `workspace.preview`.
 
@@ -41,7 +41,7 @@ In `package` you specify properties specific to the package you want to build.
 ```
 
 Packages are built by using build backends.
-By specifying `package.build.backend` and `package.build.channels` you determine which backend is used and from which channel it will be downloaded.
+By specifying `package.build.backend` you determine which backend is used, and with `package.build.backend.channels` from which channel it will be downloaded.
 
 There are [different build backends available](backends.md). 
 

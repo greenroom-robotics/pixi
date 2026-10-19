@@ -114,7 +114,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let mut workspace = WorkspaceLocator::for_cli()
         .with_global_config_source(args.config_source.source())
         .with_search_start(args.workspace_config.workspace_locator_start())
-        .locate()?;
+        .locate()
+        .await?;
 
     match args.command {
         Command::Add(add_args) => {
@@ -126,13 +127,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             }
 
             if add_args.has_source_dependency() {
-                workspace = ensure_pixi_build_preview_enabled(
-                    workspace,
-                    &args.config_source,
-                    args.workspace_config.workspace_locator_start(),
-                    pixi_config::ConfigCli::default(),
-                )
-                .await?;
+                workspace = ensure_pixi_build_preview_enabled(workspace).await?;
                 if let Some(backend_override) = args.workspace_config.backend_override.clone() {
                     workspace = workspace.with_backend_override(backend_override);
                 }
@@ -198,12 +193,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             } else {
                 format_workspace_dependencies(dependencies)?
             };
-            writeln!(std::io::stdout(), "{output}")
-                .inspect_err(|e| {
-                    if e.kind() == std::io::ErrorKind::BrokenPipe {
-                        std::process::exit(0);
-                    }
-                })
+            pixi_utils::io::ignore_broken_pipe(writeln!(std::io::stdout(), "{output}"))
                 .into_diagnostic()?;
             Ok(())
         }

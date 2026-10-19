@@ -31,8 +31,8 @@ use pixi_build_types::{
     },
 };
 use rattler_conda_types::{
-    PackageName, Platform, Version, VersionSpec,
-    package::{IndexJson, PathType, PathsEntry, PathsJson, RunExportsJson},
+    PackageName, Subdir, Version, VersionSpec,
+    package::{BuildString, IndexJson, PathType, PathsEntry, PathsJson, RunExportsJson},
 };
 use serde::Deserialize;
 
@@ -120,7 +120,7 @@ impl InMemoryBackend for PassthroughBackend {
         // Check if there are real variants (not just target_platform)
         let has_real_variants = variant.keys().any(|k| k != "target_platform");
         let build_string =
-            compute_build_string(&self.index_json.build, &variant, has_real_variants);
+            compute_build_string(self.index_json.build.as_str(), &variant, has_real_variants);
 
         let output_dir = params
             .output_directory
@@ -139,7 +139,7 @@ impl InMemoryBackend for PassthroughBackend {
                 if self.config.noarch == Some(false) {
                     params.output.subdir
                 } else {
-                    Platform::NoArch
+                    Subdir::NoArch
                 }
             });
 
@@ -162,7 +162,7 @@ impl InMemoryBackend for PassthroughBackend {
                 // Create a modified index_json with augmented fields from project_model
                 // This must match what conda_outputs returns in CondaOutputMetadata
                 let mut modified_index_json = self.index_json.clone();
-                modified_index_json.build = build_string.clone();
+                modified_index_json.build = BuildString::new_unchecked(build_string.clone());
                 modified_index_json.subdir = Some(subdir.to_string());
                 if let Some(name) = &self.project_model.name {
                     modified_index_json.name =
@@ -208,8 +208,11 @@ impl InMemoryBackend for PassthroughBackend {
                 create_conda_package_on_the_fly(&modified_index_json, &output_path).map_err(
                     |err| {
                         Box::new(
-                            BackendError::new(format!("failed to create conda package: {}", err))
-                                .into(),
+                            Box::new(BackendError::new(format!(
+                                "failed to create conda package: {}",
+                                err
+                            )))
+                            .into(),
                         )
                     },
                 )?;
@@ -538,7 +541,7 @@ fn create_output(
             if config.noarch == Some(false) {
                 params.host_platform
             } else {
-                Platform::NoArch
+                Subdir::NoArch
             }
         });
 
@@ -602,7 +605,7 @@ fn create_output(
         .or_else(|| Some(index_json.version.version()))
         .cloned()
         .unwrap_or_else(|| Version::major(0));
-    let output_build = compute_build_string(&index_json.build, &variant, has_real_variants);
+    let output_build = compute_build_string(index_json.build.as_str(), &variant, has_real_variants);
 
     CondaOutput {
         build_dependencies: Some(extract_dependencies(
@@ -1060,9 +1063,9 @@ impl InMemoryBackendInstantiator for PassthroughBackendInstantiator {
         let project_model = match params.project_model {
             Some(project_model) => project_model,
             None => {
-                return Err(Box::new(CommunicationError::BackendError(
+                return Err(Box::new(CommunicationError::BackendError(Box::new(
                     BackendError::new("Passthrough backend requires a project model"),
-                )));
+                ))));
             }
         };
 
@@ -1080,11 +1083,11 @@ impl InMemoryBackendInstantiator for PassthroughBackendInstantiator {
                     match rattler_package_streaming::seek::read_package_file(&path) {
                         Err(err) => {
                             return Err(Box::new(
-                                BackendError::new(format!(
+                                Box::new(BackendError::new(format!(
                                     "failed to read index.json from '{}': {}",
                                     path.display(),
                                     err
-                                ))
+                                )))
                                 .into(),
                             ));
                         }
@@ -1099,7 +1102,7 @@ impl InMemoryBackendInstantiator for PassthroughBackendInstantiator {
                 // Create IndexJson from project model for on-the-fly package generation
                 let index_json = IndexJson {
                     arch: None,
-                    build: String::new(),
+                    build: BuildString::new_unchecked(""),
                     build_number: 0,
                     constrains: vec![],
                     depends: vec![],

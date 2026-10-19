@@ -16,7 +16,7 @@ use pixi_manifest::{FeaturesExt, HasFeaturesIter, HasWorkspaceManifest};
 use pixi_progress::await_in_progress;
 use pixi_task::TaskName;
 use pixi_utils::reqwest::tls_backend;
-use rattler_conda_types::{GenericVirtualPackage, Platform};
+use rattler_conda_types::{GenericVirtualPackage, Subdir};
 use rattler_networking::authentication_storage;
 use rattler_virtual_packages::{VirtualPackage, VirtualPackageOverrides};
 use serde::Serialize;
@@ -81,7 +81,7 @@ impl From<&pixi_manifest::PixiPlatform> for PlatformInfo {
             subdir: platform.subdir().to_string(),
             // Declared platform: filter the subdir defaults, like `platform list`.
             virtual_packages: friendly_virtual_packages(
-                platform.declared_virtual_packages(),
+                platform.manifest_virtual_package_records().as_ref(),
                 Some(&subdir_default_virtual_packages(platform.subdir())),
             ),
         }
@@ -462,6 +462,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         .with_global_config_source(source.clone())
         .with_search_start(args.project_config.workspace_locator_start())
         .locate()
+        .await
         .ok();
 
     let (pixi_folder_size, cache_size) = if args.extended {
@@ -584,7 +585,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     };
 
     let info = Info {
-        platform: Platform::current().to_string(),
+        platform: Subdir::current().unwrap_or(Subdir::NoArch).to_string(),
         virtual_packages,
         version: consts::PIXI_VERSION.to_string(),
         tls_backend: tls_backend().to_string(),
@@ -598,26 +599,14 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     };
 
     if args.json {
-        writeln!(
+        pixi_utils::io::ignore_broken_pipe(writeln!(
             std::io::stdout(),
             "{}",
             serde_json::to_string_pretty(&info).into_diagnostic()?
-        )
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::BrokenPipe {
-                std::process::exit(0);
-            }
-            e
-        })
+        ))
         .into_diagnostic()?;
     } else {
-        writeln!(std::io::stdout(), "{info}")
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::BrokenPipe {
-                    std::process::exit(0);
-                }
-                e
-            })
+        pixi_utils::io::ignore_broken_pipe(writeln!(std::io::stdout(), "{info}"))
             .into_diagnostic()?;
     }
 

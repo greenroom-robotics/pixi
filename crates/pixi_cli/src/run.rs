@@ -1,9 +1,8 @@
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
-    convert::identity,
     ffi::OsString,
     io::Read,
-    string::String,
+    process::ExitCode,
 };
 
 #[cfg(unix)]
@@ -17,6 +16,7 @@ use indicatif::ProgressDrawTarget;
 use itertools::Itertools;
 use miette::{Diagnostic, IntoDiagnostic};
 use pixi_config::{ConfigCli, ConfigCliActivation};
+use pixi_core::host::HostDetection;
 use pixi_core::{
     Workspace, WorkspaceLocator,
     environment::sanity_check_workspace,
@@ -36,7 +36,7 @@ use pixi_task::{
     AmbiguousTask, CanSkip, ExecutableTask, FailedToParseShellScript, InvalidWorkingDirectory,
     PreferExecutable, SearchEnvironments, TaskAndEnvironment, TaskGraph, get_task_env,
 };
-use rattler_conda_types::Platform;
+use rattler_conda_types::Subdir;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
@@ -166,7 +166,7 @@ impl Args {
 /// CLI entry point for `pixi run`
 /// When running the sigints are ignored and child can react to them. As it
 /// pleases.
-pub async fn execute(mut args: Args) -> miette::Result<()> {
+pub async fn execute(mut args: Args) -> miette::Result<ExitCode> {
     args.validate_script_options()?;
 
     // Following statements don't spawn any progress bar, so set
@@ -209,6 +209,7 @@ pub async fn execute(mut args: Args) -> miette::Result<()> {
                         root,
                         &prepared.cache_name,
                         &cache_key,
+                        HostDetection::detect().await,
                     )?;
                     if not_hidden {
                         global_multi_progress()
@@ -217,10 +218,7 @@ pub async fn execute(mut args: Args) -> miette::Result<()> {
                     let code =
                         crate::conda_script::execute_run(workspace, entrypoint, args).await?;
                     drop(prepared.directory);
-                    if code != 0 {
-                        process_exit::exit_with_code(code);
-                    }
-                    return Ok(());
+                    return Ok(process_exit::exit_code_from_code(code));
                 }
             };
             let script_path = manifest.path().to_owned();
@@ -234,6 +232,7 @@ pub async fn execute(mut args: Args) -> miette::Result<()> {
                 script_path,
                 &prepared.cache_name,
                 &cache_key,
+                HostDetection::detect().await,
             )?;
             for warning in warnings {
                 tracing::warn!("{warning}");
@@ -263,6 +262,7 @@ pub async fn execute(mut args: Args) -> miette::Result<()> {
                 "<stdin>".into(),
                 "stdin",
                 &cache_key,
+                HostDetection::detect().await,
             )?;
             for warning in warnings {
                 tracing::warn!("{warning}");
@@ -293,24 +293,26 @@ pub async fn execute(mut args: Args) -> miette::Result<()> {
                     global_multi_progress().set_draw_target(ProgressDrawTarget::stderr_with_hz(20));
                 }
                 let entrypoint = manifest.metadata().entrypoint.clone();
-                let workspace = Workspace::from_conda_script(manifest, config)?;
+                let workspace =
+                    Workspace::from_conda_script(manifest, config, HostDetection::detect().await)?;
                 let code = crate::conda_script::execute_run(workspace, entrypoint, args).await?;
-                if code != 0 {
-                    process_exit::exit_with_code(code);
-                }
-                return Ok(());
+                return Ok(process_exit::exit_code_from_code(code));
             }
             WorkspaceLocator::for_cli()
                 .with_global_config_source(global_config_source)
                 .with_search_start(pixi_core::workspace::DiscoveryStart::Script(path))
                 .with_cli_config(cli_config)
-                .locate()?
+                .locate()
+                .await?
         }
-        None => WorkspaceLocator::for_cli()
-            .with_global_config_source(global_config_source)
-            .with_search_start(args.workspace_config.workspace_locator_start())
-            .with_cli_config(cli_config)
-            .locate()?,
+        None => {
+            WorkspaceLocator::for_cli()
+                .with_global_config_source(global_config_source)
+                .with_search_start(args.workspace_config.workspace_locator_start())
+                .with_cli_config(cli_config)
+                .locate()
+                .await?
+        }
     };
 
     let stdin_display_args = if stdin_script_command.is_some() {
@@ -350,7 +352,7 @@ pub async fn execute(mut args: Args) -> miette::Result<()> {
     // Print all available tasks if no task is provided
     if args.task.is_empty() {
         command_not_found(&workspace, explicit_environment);
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     // We expect progress bar to be used afterwards, so set draw
@@ -673,7 +675,7 @@ pub async fn execute(mut args: Args) -> miette::Result<()> {
                 if code == 127 {
                     command_not_found(&workspace, explicit_environment.clone());
                 }
-                process_exit::exit_with_code(code);
+                return Ok(process_exit::exit_code_from_code(code));
             }
             Err(err) => return Err(err.into()),
         }
@@ -692,7 +694,7 @@ pub async fn execute(mut args: Args) -> miette::Result<()> {
             .into_diagnostic()?;
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Called when a command was not found.
@@ -729,8 +731,8 @@ fn command_not_found<'p>(workspace: &'p Workspace, explicit_environment: Option<
     }) {
         pixi_progress::println!(
             "\nHelp: This platform ({}) is not supported. Please run the following command to add this platform to the workspace:\n\n\tpixi workspace platform add {}",
-            Platform::current(),
-            Platform::current()
+            Subdir::current().unwrap_or(Subdir::NoArch),
+            Subdir::current().unwrap_or(Subdir::NoArch)
         );
     }
 }
@@ -748,7 +750,7 @@ enum TaskExecutionError {
     InvalidWorkingDirectory(#[from] InvalidWorkingDirectory),
 
     #[error(transparent)]
-    UnsupportedPlatformError(#[from] UnsupportedPlatformError),
+    UnsupportedPlatformError(#[from] Box<UnsupportedPlatformError>),
 }
 
 /// Called to execute a single command.
@@ -825,7 +827,7 @@ fn disambiguate_task_interactive<'p>(
         .items(&environment_names)
         .default(0)
         .interact_opt()
-        .map_or(None, identity)
+        .unwrap_or(None)
         .map(|idx| problem.environments[idx].clone())
 }
 
@@ -840,17 +842,6 @@ fn reset_cursor() {
     let term = console::Term::stdout();
     let _ = term.show_cursor();
 }
-
-// /// Exit the process with the appropriate exit code for a SIGINT.
-// fn exit_process_on_sigint() {
-//     // https://learn.microsoft.com/en-us/cpp/c-runtime-library/signal-constants
-//     #[cfg(target_os = "windows")]
-//     std::process::exit(3);
-//
-//     // POSIX compliant OSs: 128 + SIGINT (2)
-//     #[cfg(not(target_os = "windows"))]
-//     std::process::exit(130);
-// }
 
 /// Runs a task future forwarding any signals received to the process.
 ///

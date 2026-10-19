@@ -10,7 +10,7 @@ use pep440_rs::VersionSpecifiers;
 use pixi_command_dispatcher::{
     BuildBackendMetadataError, DevSourceMetadataError, SourceCheckoutError,
 };
-use pixi_manifest::{PixiPlatformName, pypi::pypi_options::PrereleaseMode};
+use pixi_manifest::{ExcludeNewerError, PixiPlatformName, pypi::pypi_options::PrereleaseMode};
 use pixi_record::{ParseLockFileError, SourceMismatchError};
 use pixi_uv_conversions::AsPep508Error;
 use rattler_conda_types::{MatchSpec, PackageName, ParseChannelError, ParseMatchSpecError};
@@ -43,6 +43,10 @@ pub enum EnvironmentUnsat {
 
     #[error(transparent)]
     InvalidChannel(#[from] ParseChannelError),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    ExcludeNewer(#[from] ExcludeNewerError),
 
     #[error(transparent)]
     InvalidDistExtensionInNoBuild(#[from] ExtensionError),
@@ -99,8 +103,8 @@ pub enum EnvironmentUnsat {
 #[derive(Debug, Error)]
 pub struct PlatformDefinitionChanged {
     pub(super) name: PixiPlatformName,
-    pub(super) expected_subdir: rattler_conda_types::Platform,
-    pub(super) found_subdir: rattler_conda_types::Platform,
+    pub(super) expected_subdir: rattler_conda_types::Subdir,
+    pub(super) found_subdir: rattler_conda_types::Subdir,
     pub(super) expected_virtual_packages: Vec<String>,
     pub(super) found_virtual_packages: Vec<String>,
 }
@@ -178,12 +182,14 @@ pub(super) fn verify_exclude_newer(
                 .and_then(|binary| binary.channel.as_ref())
                 .map(ToString::to_string);
 
-            if let Some(timestamp) = record.timestamp.as_ref()
-                && exclude_newer.is_excluded(&record.name, channel.as_deref(), Some(timestamp))
+            // Select the timestamp the same way the solver does: the index
+            // timestamp if present, the build timestamp otherwise.
+            if let Some(timestamp) = record.indexed_timestamp.or(record.timestamp)
+                && timestamp > exclude_newer.cutoff_for_package(&record.name, channel.as_deref())
             {
                 return Err(ExcludeNewerMismatch {
                     package: record.name.as_source().to_string(),
-                    timestamp: (*timestamp).into(),
+                    timestamp: timestamp.into(),
                     exclude_newer: exclude_newer
                         .cutoff_for_package(&record.name, channel.as_deref()),
                 });
@@ -452,6 +458,9 @@ pub enum PlatformUnsat {
 
     #[error("direct pypi url dependency to a conda installed package '{0}' is not supported")]
     DirectUrlDependencyOnCondaInstalledPackage(uv_normalize::PackageName),
+
+    #[error("git archive dependency '{0}' is not supported")]
+    UnsupportedGitArchiveDependency(uv_normalize::PackageName),
 
     #[error("git dependency on a conda installed package '{0}' is not supported")]
     GitDependencyOnCondaInstalledPackage(uv_normalize::PackageName),
@@ -752,7 +761,7 @@ pub enum VerifyError {
 #[derive(Debug, Error, Diagnostic)]
 #[error(transparent)]
 #[diagnostic(transparent)]
-pub struct UnverifiableError(UnverifiableCause);
+pub struct UnverifiableError(Box<UnverifiableCause>);
 
 #[derive(Debug, Error, Diagnostic)]
 enum UnverifiableCause {
@@ -773,15 +782,20 @@ enum UnverifiableCause {
     DevSourceMetadata(DevSourceMetadataError),
 }
 
+impl From<UnverifiableCause> for UnverifiableError {
+    fn from(cause: UnverifiableCause) -> Self {
+        Self(Box::new(cause))
+    }
+}
+
 impl VerifyError {
     pub(crate) fn backend_metadata(
         package: PackageName,
         source: BuildBackendMetadataError,
     ) -> Self {
-        Self::Unverifiable(UnverifiableError(UnverifiableCause::BackendMetadata {
-            package,
-            source,
-        }))
+        Self::Unverifiable(UnverifiableError::from(
+            UnverifiableCause::BackendMetadata { package, source },
+        ))
     }
 }
 
@@ -799,7 +813,9 @@ impl From<PlatformUnsat> for VerifyError {
 
 impl From<SourceCheckoutError> for VerifyError {
     fn from(err: SourceCheckoutError) -> Self {
-        Self::Unverifiable(UnverifiableError(UnverifiableCause::SourceCheckout(err)))
+        Self::Unverifiable(UnverifiableError::from(UnverifiableCause::SourceCheckout(
+            err,
+        )))
     }
 }
 
@@ -813,9 +829,9 @@ impl From<DevSourceMetadataError> for VerifyError {
                 }
                 .into()
             }
-            other => Self::Unverifiable(UnverifiableError(UnverifiableCause::DevSourceMetadata(
-                other,
-            ))),
+            other => Self::Unverifiable(UnverifiableError::from(
+                UnverifiableCause::DevSourceMetadata(other),
+            )),
         }
     }
 }

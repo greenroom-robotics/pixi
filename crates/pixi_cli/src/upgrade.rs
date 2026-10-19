@@ -78,7 +78,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let workspace = WorkspaceLocator::for_cli()
         .with_global_config_source(args.config_source.source())
         .with_search_start(args.workspace_config.workspace_locator_start())
-        .locate()?
+        .locate()
+        .await?
         .with_cli_config(args.config.clone());
 
     // One reporter for the whole command: the per-feature solves below and the
@@ -500,10 +501,8 @@ fn parse_specs(
                 {
                     // If the build contains a wildcard, keep it
                     nameless_match_spec.build = match nameless_match_spec.build {
-                        Some(build @ StringMatcher::Glob(_) | build @ StringMatcher::Regex(_)) => {
-                            Some(build)
-                        }
-                        _ => None,
+                        Some(StringMatcher::Exact(_)) | None => None,
+                        build => build,
                     };
                     nameless_match_spec.build_number = None;
                     nameless_match_spec.md5 = None;

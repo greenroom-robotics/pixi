@@ -42,18 +42,18 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let workspace = WorkspaceLocator::for_cli()
         .with_global_config_source(args.config_source.source())
         .with_search_start(args.workspace_config.workspace_locator_start())
-        .locate()?;
+        .locate()
+        .await?;
 
     let workspace_ctx = cli_context(workspace);
 
     match args.command {
-        Command::Get => writeln!(std::io::stdout(), "{}", workspace_ctx.name().await)
-            .inspect_err(|e| {
-                if e.kind() == std::io::ErrorKind::BrokenPipe {
-                    std::process::exit(0);
-                }
-            })
-            .into_diagnostic()?,
+        Command::Get => pixi_utils::io::ignore_broken_pipe(writeln!(
+            std::io::stdout(),
+            "{}",
+            workspace_ctx.name().await
+        ))
+        .into_diagnostic()?,
         Command::Set(args) => workspace_ctx.set_name(&args.name).await?,
     }
 

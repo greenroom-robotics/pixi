@@ -133,7 +133,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let workspace = WorkspaceLocator::for_cli()
         .with_global_config_source(args.config_source.source())
         .with_search_start(args.workspace_config.workspace_locator_start())
-        .locate()?;
+        .locate()
+        .await?;
 
     let is_script = args.workspace_config.script.is_some();
     let lock_file_exists = workspace.lock_file_path().is_file();
@@ -152,20 +153,15 @@ pub async fn execute(args: Args) -> miette::Result<()> {
         Command::List(args) => {
             let environments = workspace_ctx.list_channel().await;
             for (env_name, channels) in environments {
-                let _ = writeln!(
+                let _ = pixi_utils::io::ignore_broken_pipe(writeln!(
                     std::io::stdout(),
                     "{} {}",
                     console::style("Environment:").bold().bright(),
                     env_name.fancy_display()
-                )
-                .inspect_err(|e| {
-                    if e.kind() == std::io::ErrorKind::BrokenPipe {
-                        std::process::exit(0);
-                    }
-                });
+                ));
 
                 for channel in channels {
-                    let _ = writeln!(
+                    let _ = pixi_utils::io::ignore_broken_pipe(writeln!(
                         std::io::stdout(),
                         "- {}",
                         if args.urls {
@@ -177,12 +173,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                         } else {
                             channel.to_string()
                         }
-                    )
-                    .inspect_err(|e| {
-                        if e.kind() == std::io::ErrorKind::BrokenPipe {
-                            std::process::exit(0);
-                        }
-                    });
+                    ));
                 }
             }
             Ok(())

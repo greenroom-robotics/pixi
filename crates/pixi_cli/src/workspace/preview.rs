@@ -86,7 +86,8 @@ pub async fn execute(args: Args) -> miette::Result<()> {
     let located = WorkspaceLocator::for_cli()
         .with_global_config_source(args.config_source.source())
         .with_search_start(args.workspace_config.workspace_locator_start())
-        .locate();
+        .locate()
+        .await;
 
     match args.command {
         Command::Add(add) => {
@@ -106,13 +107,7 @@ pub async fn execute(args: Args) -> miette::Result<()> {
             let workspace_ctx = cli_context(located?);
             let mut stdout = std::io::stdout();
             for flag in workspace_ctx.preview_flags().await {
-                writeln!(stdout, "{flag}")
-                    .inspect_err(|e| {
-                        if e.kind() == std::io::ErrorKind::BrokenPipe {
-                            std::process::exit(0);
-                        }
-                    })
-                    .into_diagnostic()?;
+                pixi_utils::io::ignore_broken_pipe(writeln!(stdout, "{flag}")).into_diagnostic()?;
             }
             Ok(())
         }

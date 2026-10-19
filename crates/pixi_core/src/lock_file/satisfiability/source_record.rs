@@ -12,7 +12,8 @@ use pixi_record::{PinnedBuildSourceSpec, PixiRecord, SourceRecordData};
 use pixi_spec::{BinarySpec, PixiSpec, SourceAnchor, SourceLocationSpec, SpecConversionError};
 use pixi_spec_containers::DependencyMap;
 use rattler_conda_types::{
-    MatchSpec, Matches, NamelessMatchSpec, PackageName, package::RunExportsJson,
+    MatchSpec, Matches, NamelessMatchSpec, PackageName,
+    package::{BuildString, RunExportsJson},
 };
 use std::collections::HashSet;
 
@@ -806,7 +807,7 @@ fn verify_locked_against_backend_specs(
                     unsat(format!("{} (pin_compatible: {err})", dep_name.as_source()))
                 })?;
                 let resolved = pin
-                    .resolve(&pin_record.version, &pin_record.build)
+                    .resolve(&pin_record.version, pin_record.build.as_str())
                     .map_err(|err| {
                         unsat(format!("{} (pin_compatible: {err})", dep_name.as_source()))
                     })?;
@@ -883,21 +884,21 @@ fn build_full_source_record_from_output(
     use pixi_record::{FullSourceRecordData, SourceRecord as FullRecord};
     use rattler_conda_types::PackageRecord;
 
-    // Reuse the locked record's resolved depends/constrains when
-    // available. For a partial-only record the lock file carried
-    // `depends` but not `constrains`, so default constrains to empty.
+    // Reuse the locked record's resolved depends/constrains when available.
     let (depends, constrains): (Vec<String>, Vec<String>) = match &record.data {
         SourceRecordData::Full(full) => (
             full.package_record.depends.clone(),
             full.package_record.constrains.clone(),
         ),
-        SourceRecordData::Partial(partial) => (partial.depends.clone(), Vec::new()),
+        SourceRecordData::Partial(partial) => (partial.depends.clone(), partial.constrains.clone()),
     };
     let package_record = PackageRecord {
         size: None,
         sha256: None,
         md5: None,
         timestamp: None,
+        indexed_timestamp: None,
+        attestations_sha256: None,
         platform: output
             .metadata
             .subdir
@@ -910,7 +911,7 @@ fn build_full_source_record_from_output(
             .as_ref()
             .map(ToString::to_string),
         name: output.metadata.name.clone(),
-        build: output.metadata.build.clone(),
+        build: BuildString::new_unchecked(output.metadata.build.clone()),
         version: output.metadata.version.clone(),
         build_number: output.metadata.build_number,
         license: output.metadata.license.clone(),
@@ -985,8 +986,8 @@ mod tests {
     };
     use pixi_spec::{SourceAnchor, SourceSpec};
     use rattler_conda_types::{
-        ChannelConfig, NoArchType, PackageName, PackageRecord, Platform, RepoDataRecord,
-        VersionSpec, VersionWithSource,
+        ChannelConfig, NoArchType, PackageName, PackageRecord, RepoDataRecord, Subdir, VersionSpec,
+        VersionWithSource,
         package::{DistArchiveIdentifier, RunExportsJson},
     };
     use std::{
@@ -1005,7 +1006,7 @@ mod tests {
         let mut pr = PackageRecord::new(
             pkg_name,
             VersionWithSource::from_str(version).expect("valid version"),
-            "h0".into(),
+            "h0".parse().unwrap(),
         );
         pr.subdir = "linux-64".into();
         let file_name = format!("{name}-{version}-h0.conda");
@@ -1097,7 +1098,7 @@ mod tests {
                     .into(),
                 build: "h0_0".to_string(),
                 build_number: 0,
-                subdir: Platform::Linux64,
+                subdir: Subdir::Linux64,
                 license: None,
                 license_family: None,
                 flags: Default::default(),
@@ -1563,7 +1564,7 @@ mod tests {
             "1.0.0"
                 .parse::<rattler_conda_types::VersionWithSource>()
                 .unwrap(),
-            "h0_0".into(),
+            "h0_0".parse().unwrap(),
         );
         pr.subdir = "linux-64".into();
         pr.depends = depends;

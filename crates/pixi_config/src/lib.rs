@@ -9,10 +9,9 @@ use std::{
 use clap::{ArgAction, Parser};
 use indexmap::IndexMap;
 use itertools::Itertools;
-use miette::{Context, IntoDiagnostic, miette};
 use pixi_consts::consts;
 use rattler_conda_types::{
-    ChannelConfig, NamedChannelOrUrl, Platform, Version, VersionBumpType, VersionSpec,
+    ChannelConfig, NamedChannelOrUrl, Subdir, Version, VersionBumpType, VersionSpec,
     version_spec::{EqualityOperator, LogicalOperator, RangeOperator},
 };
 use rattler_config::config::{CommonConfig, ConfigBase};
@@ -230,10 +229,23 @@ pub fn pixi_home() -> Option<PathBuf> {
 ///   exists.
 /// - If that is not set, the default cache directory of
 ///   [`rattler::default_cache_dir`] is used.
-pub fn get_cache_dir() -> miette::Result<PathBuf> {
+pub fn get_cache_dir() -> Result<PathBuf, CacheDirError> {
     resolve_cache_root(&GLOBAL_CACHE_CONFIG)
         .map(|(path, _)| path)
-        .ok_or_else(|| miette::miette!("could not determine default cache directory"))
+        .ok_or(CacheDirError)
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("could not determine default cache directory")]
+pub struct CacheDirError;
+
+/// A path in the config that cannot be used as configured.
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum ConfigPathError {
+    #[error("could not resolve home directory for '~' in `{key}` = {}", path.display())]
+    HomeDirNotFound { key: &'static str, path: PathBuf },
+    #[error("`{key}` must be an absolute path, got: {}", path.display())]
+    NotAbsolute { key: &'static str, path: PathBuf },
 }
 
 /// How the cache directory was resolved.
@@ -500,17 +512,14 @@ impl CacheConfig {
     ///
     /// Mirrors the existing behavior of the top-level `detached-environments`
     /// field. Called automatically by [`Config::from_toml`].
-    pub fn expand_paths(&mut self) -> miette::Result<()> {
+    pub fn expand_paths(&mut self) -> Result<(), ConfigPathError> {
         for (name, path) in self.iter_paths_mut() {
             if !path.to_string_lossy().starts_with('~') {
                 continue;
             }
-            let home_dir = dirs::home_dir().ok_or_else(|| {
-                miette!(
-                    "could not resolve home directory for '~' in `{}` = {}",
-                    name,
-                    path.display()
-                )
+            let home_dir = dirs::home_dir().ok_or_else(|| ConfigPathError::HomeDirNotFound {
+                key: name,
+                path: path.clone(),
             })?;
             // Safe unwrap: we just checked the path starts with '~'.
             *path = home_dir.join(path.strip_prefix("~").unwrap());
@@ -520,7 +529,7 @@ impl CacheConfig {
 
     /// Ensure every set path is absolute. `~` should already be expanded by
     /// [`Self::expand_paths`] before calling this.
-    pub fn validate(&self) -> miette::Result<()> {
+    pub fn validate(&self) -> Result<(), ConfigPathError> {
         // iter_paths_mut takes &mut, so reuse the field list locally rather
         // than cloning. Keep this in sync with `iter_paths_mut`.
         let entries: [(&str, Option<&PathBuf>); 8] = [
@@ -541,11 +550,10 @@ impl CacheConfig {
         ];
         for (name, path) in entries.into_iter().filter_map(|(n, p)| p.map(|p| (n, p))) {
             if !path.is_absolute() {
-                return Err(miette!(
-                    "`{}` must be an absolute path, got: {}",
-                    name,
-                    path.display()
-                ));
+                return Err(ConfigPathError::NotAbsolute {
+                    key: name,
+                    path: path.clone(),
+                });
             }
         }
         Ok(())
@@ -617,7 +625,10 @@ fn env_netfs_redirect() -> Option<NetfsRedirect> {
     }
 }
 
-fn resolve_cache_kind_dir(cache_cfg: &CacheConfig, kind: CacheKind) -> miette::Result<PathBuf> {
+fn resolve_cache_kind_dir(
+    cache_cfg: &CacheConfig,
+    kind: CacheKind,
+) -> Result<PathBuf, CacheDirError> {
     // Env vars override TOML for per-kind paths. Setting one bypasses the
     // redirect logic for that kind, mirroring the TOML field's semantics.
     if let Some(p) = env_path_for(kind) {
@@ -627,8 +638,7 @@ fn resolve_cache_kind_dir(cache_cfg: &CacheConfig, kind: CacheKind) -> miette::R
         return Ok(p.to_path_buf());
     }
 
-    let (base, source) = resolve_cache_root(cache_cfg)
-        .ok_or_else(|| miette::miette!("could not determine default cache directory"))?;
+    let (base, source) = resolve_cache_root(cache_cfg).ok_or(CacheDirError)?;
     let pinned = matches!(source, CacheDirSource::UserPinned);
 
     let redirect_mode = env_netfs_redirect().unwrap_or(cache_cfg.netfs_redirect);
@@ -866,7 +876,7 @@ pub struct PyPIConfig {
 // `S3Options` and the `S3OptionsMap` newtype now live in `rattler_config`.
 // Re-exported so external crates that referenced `pixi_config::S3Options`
 // keep compiling.
-pub use rattler_config::config::s3::{S3Options, S3OptionsMap};
+pub use rattler_config::config::s3::{S3AddressingStyle, S3Options, S3OptionsMap};
 
 // The `azure-options` table, keyed by endpoint. Re-exported alongside the option
 // types a caller needs to build an entry, so writing one does not mean depending
@@ -898,18 +908,16 @@ impl AzureConfigField {
     /// Neither a field name nor a container name can contain a dot, so a tail of
     /// one or two segments is enough to recognise; everything before it is the
     /// endpoint, quotes and all (`"host:10000/account".auth.releases`).
-    fn split(subkey: &str) -> miette::Result<(&str, Option<Self>)> {
+    fn split(subkey: &str) -> Result<(&str, Option<Self>), SetConfigError> {
         let Some((head, tail)) = subkey.rsplit_once('.') else {
             return Ok((subkey, None));
         };
         match tail {
             "scheme" => return Ok((head, Some(Self::Scheme))),
             "auth" => {
-                return Err(miette!(
-                    "`azure-options.{head}.auth` is a table of containers, not a value. Grant one \
-                     container at a time with `azure-options.{head}.auth.<container>`: Azure \
-                     assigns access per container, so there is no host-wide grant to set."
-                ));
+                return Err(SetConfigError::AzureEndpointWideGrant {
+                    endpoint: head.to_string(),
+                });
             }
             _ => {}
         }
@@ -917,9 +925,8 @@ impl AzureConfigField {
         // the segment before it is `auth`; otherwise the whole subkey is the endpoint.
         match head.rsplit_once('.') {
             Some((endpoint, "auth")) => {
-                let container = ContainerName::new(tail).map_err(|e| {
-                    miette!("`{subkey}` does not name a valid Azure container: {e}")
-                })?;
+                let container = ContainerName::new(tail)
+                    .map_err(invalid_value(&format!("azure-options.{subkey}")))?;
                 Ok((endpoint, Some(Self::Auth(container))))
             }
             _ => Ok((subkey, None)),
@@ -962,19 +969,18 @@ impl DetachedEnvironments {
     /// If `self` is the `DetachedEnvironments::Path` variant, expands `~`
     /// to the absolute path to the home directory, otherwise clone the boolean
     /// variant.
-    pub fn resolve_path(&self) -> miette::Result<Self> {
+    pub fn resolve_path(&self) -> Result<Self, ConfigPathError> {
         match self {
             DetachedEnvironments::Boolean(_) => Ok(self.clone()),
             DetachedEnvironments::Path(p) => {
                 let mut path = p.clone();
                 // If the path starts with ~, expand it to the home directory
                 if path.to_string_lossy().starts_with("~") {
-                    let home_dir = dirs::home_dir().ok_or_else(|| {
-                        miette!(
-                            "Could not resolve home directory for '~' in path {}",
-                            path.display()
-                        )
-                    })?;
+                    let home_dir =
+                        dirs::home_dir().ok_or_else(|| ConfigPathError::HomeDirNotFound {
+                            key: "detached-environments",
+                            path: path.clone(),
+                        })?;
                     // Safe unwrap as we checked if it starts with ~
                     path = home_dir.join(path.strip_prefix("~").unwrap());
                 }
@@ -983,7 +989,7 @@ impl DetachedEnvironments {
         }
     }
 
-    pub fn validate(&self) -> miette::Result<()> {
+    pub fn validate(&self) -> Result<(), ConfigPathError> {
         // Resolve the path variant (if present) prior to validating it.
         let resolved_self = self.resolve_path()?;
 
@@ -991,10 +997,10 @@ impl DetachedEnvironments {
             DetachedEnvironments::Boolean(_) => {}
             DetachedEnvironments::Path(path) => {
                 if !path.is_absolute() {
-                    return Err(miette!(
-                        "The `detached-environments` path must be an absolute path: {}",
-                        path.display()
-                    ));
+                    return Err(ConfigPathError::NotAbsolute {
+                        key: "detached-environments",
+                        path,
+                    });
                 }
             }
         }
@@ -1370,7 +1376,7 @@ pub struct Config {
     /// these types of tools.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_platform: Option<Platform>,
+    pub tool_platform: Option<Subdir>,
 
     /// Per-cache directory configuration. Lets users redirect specific
     /// caches (conda packages, repodata, pypi mapping, etc.) to different
@@ -1685,16 +1691,77 @@ pub use rattler_config::config::proxy::ProxyConfig;
 // `rattler_config`. Re-exported so external paths keep compiling.
 pub use rattler_config::config::build::{BuildConfig, PackageFormatAndCompression};
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, miette::Diagnostic, Debug)]
 pub enum ConfigError {
     #[error("no file was found at {0}")]
     FileNotFound(PathBuf),
     #[error("failed to read config from '{0}'")]
     ReadError(std::io::Error),
     #[error("failed to parse config of {1}: {0}")]
-    ParseError(miette::Report, PathBuf),
+    ParseError(ParseConfigError, PathBuf),
     #[error("validation error of {1}: {0}")]
-    ValidationError(miette::Report, PathBuf),
+    ValidationError(ConfigPathError, PathBuf),
+}
+
+#[derive(thiserror::Error, miette::Diagnostic, Debug)]
+pub enum ParseConfigError {
+    #[error(transparent)]
+    Toml(#[from] toml_edit::de::Error),
+    #[error(transparent)]
+    SharedToml(#[from] toml::de::Error),
+    #[error(transparent)]
+    Path(#[from] ConfigPathError),
+}
+
+#[derive(thiserror::Error, miette::Diagnostic, Debug)]
+pub enum SetConfigError {
+    #[error("Unknown key: {}\nSupported keys:\n\t{supported_keys}", console::style(key).red())]
+    UnknownKey { key: String, supported_keys: String },
+    #[error("invalid value for `{key}`")]
+    InvalidValue {
+        key: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("`{key}` requires a value")]
+    MissingValue { key: String },
+    #[error("The `{key}` field is deprecated. Please use the `shell.{key}` field instead.")]
+    Deprecated { key: String },
+    #[error(
+        "`azure-options.{endpoint}.auth` is a table of containers, not a value. Grant one \
+         container at a time with `azure-options.{endpoint}.auth.<container>`: Azure assigns \
+         access per container, so there is no host-wide grant to set."
+    )]
+    AzureEndpointWideGrant { endpoint: String },
+    #[error(transparent)]
+    Path(#[from] ConfigPathError),
+}
+
+fn invalid_value<E: std::error::Error + Send + Sync + 'static>(
+    key: &str,
+) -> impl FnOnce(E) -> SetConfigError + '_ {
+    move |source| SetConfigError::InvalidValue {
+        key: key.to_string(),
+        source: Box::new(source),
+    }
+}
+
+fn parse_opt<T: FromStr>(value: Option<String>, key: &str) -> Result<Option<T>, SetConfigError>
+where
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
+    value
+        .map(|v| v.parse())
+        .transpose()
+        .map_err(invalid_value(key))
+}
+
+#[derive(thiserror::Error, miette::Diagnostic, Debug)]
+pub enum SaveConfigError {
+    #[error(transparent)]
+    Serialize(#[from] toml_edit::ser::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 impl Config {
@@ -1715,8 +1782,8 @@ impl Config {
         // HACK: Use win-64 as the default tool platform if currently running on
         // win-arm64. This is a workaround for the fact that we don't have a
         // good win-arm64 toolchain yet.
-        if Platform::current() == Platform::WinArm64 {
-            config.tool_platform = Some(Platform::Win64);
+        if Subdir::current() == Some(Subdir::WinArm64) {
+            config.tool_platform = Some(Subdir::Win64);
         }
 
         config
@@ -1735,15 +1802,14 @@ impl Config {
     pub fn from_toml(
         toml: &str,
         source_path: Option<&Path>,
-    ) -> miette::Result<(Config, Set<String>)> {
-        let de = toml_edit::de::Deserializer::from_str(toml).into_diagnostic()?;
+    ) -> Result<(Config, Set<String>), ParseConfigError> {
+        let de = toml_edit::de::Deserializer::from_str(toml)?;
 
         // Deserialize the config and collect unused keys
         let mut unused_keys = Set::new();
         let mut config: Config = serde_ignored::deserialize(de, |path| {
             unused_keys.insert(path.to_string());
-        })
-        .into_diagnostic()?;
+        })?;
 
         fn create_deprecation_warning(old: &str, new: &str, source_path: Option<&Path>) {
             let msg = format!(
@@ -1862,8 +1928,7 @@ impl Config {
         };
 
         let (base, unused_keys) = ConfigBase::<Config>::from_toml_str_shared(&s)
-            .into_diagnostic()
-            .map_err(|e| ConfigError::ParseError(e, path.to_path_buf()))?;
+            .map_err(|e| ConfigError::ParseError(e.into(), path.to_path_buf()))?;
 
         // `rattler_config` folds the deprecated `tls-root-certs` spellings
         // into `system`, so read back what was actually written to keep
@@ -1941,7 +2006,7 @@ impl Config {
     }
 
     /// Validate the config file.
-    pub fn validate(&self) -> miette::Result<()> {
+    pub fn validate(&self) -> Result<(), ConfigPathError> {
         // Validate the detached environments directory is set correctly
         if let Some(detached_environments) = self.detached_environments.as_ref() {
             detached_environments.validate()?
@@ -1949,9 +2014,6 @@ impl Config {
 
         // Validate that all configured [cache] paths are absolute.
         self.cache.validate()?;
-
-        // Rejects a grant that would ride cleartext to a routable host.
-        rattler_config::config::Config::validate(&self.azure_options).into_diagnostic()?;
 
         Ok(())
     }
@@ -2128,7 +2190,7 @@ impl Config {
             "s3-options",
             "s3-options.<bucket>",
             "s3-options.<bucket>.endpoint-url",
-            "s3-options.<bucket>.force-path-style",
+            "s3-options.<bucket>.addressing-style",
             "s3-options.<bucket>.region",
             "azure-options",
             "azure-options.<endpoint>",
@@ -2341,8 +2403,10 @@ impl Config {
     }
 
     /// The platform to use to install tools.
-    pub fn tool_platform(&self) -> Platform {
-        self.tool_platform.unwrap_or(Platform::current())
+    pub fn tool_platform(&self) -> Subdir {
+        self.tool_platform
+            .or(Subdir::current())
+            .unwrap_or(Subdir::NoArch)
     }
 
     pub fn get_proxies(&self) -> reqwest::Result<Vec<Proxy>> {
@@ -2387,88 +2451,87 @@ impl Config {
     /// # Note
     ///
     /// It is required to call `save()` to persist the changes.
-    pub fn set(&mut self, key: &str, value: Option<String>) -> miette::Result<()> {
-        let show_supported_keys =
-            || format!("Supported keys:\n\t{}", self.get_keys().join(",\n\t"));
-        let err = miette::miette!(
-            "Unknown key: {}\n{}",
-            console::style(key).red(),
-            show_supported_keys()
-        );
+    pub fn set(&mut self, key: &str, value: Option<String>) -> Result<(), SetConfigError> {
+        let supported_keys = self.get_keys().join(",\n\t");
+        let err = SetConfigError::UnknownKey {
+            key: key.to_string(),
+            supported_keys,
+        };
+        let missing = SetConfigError::MissingValue {
+            key: key.to_string(),
+        };
 
         match key {
             "default-channels" => {
                 self.default_channels = value
                     .map(|v| serde_json::de::from_str(&v))
                     .transpose()
-                    .into_diagnostic()?
+                    .map_err(invalid_value(key))?
                     .unwrap_or_default();
             }
             "authentication-override-file" => {
                 self.authentication_override_file = value.map(PathBuf::from);
             }
             "tls-no-verify" => {
-                self.tls_no_verify = value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                self.tls_no_verify = parse_opt(value, key)?;
             }
             "offline" => {
-                self.offline = value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                self.offline = parse_opt(value, key)?;
             }
             "keep-going" => {
-                self.keep_going = value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                self.keep_going = parse_opt(value, key)?;
             }
             "tls-root-certs" => {
                 self.tls_root_certs = value
                     .map(|v| TlsRootCerts::from_str(v.as_str()))
                     .transpose()
-                    .into_diagnostic()?;
+                    .map_err(invalid_value(key))?;
             }
             "mirrors" => {
                 self.mirrors = value
                     .map(|v| serde_json::de::from_str(&v))
                     .transpose()
-                    .into_diagnostic()?
+                    .map_err(invalid_value(key))?
                     .unwrap_or_default();
             }
             "detached-environments" => {
                 self.detached_environments = value
                     .map(|v| {
-                        Ok::<_, miette::Report>(match v.as_str() {
+                        Ok::<_, SetConfigError>(match v.as_str() {
                             "true" => DetachedEnvironments::Boolean(true),
                             "false" => DetachedEnvironments::Boolean(false),
                             _ => DetachedEnvironments::Path(PathBuf::from(v)).resolve_path()?,
                         })
                     })
                     .transpose()?;
+                if let Some(detached) = &self.detached_environments {
+                    detached.validate()?;
+                }
             }
             "pinning-strategy" => {
                 self.pinning_strategy = value
                     .map(|v| PinningStrategy::from_str(v.as_str()))
                     .transpose()
-                    .into_diagnostic()?
+                    .map_err(invalid_value(key))?
             }
-            "change-ps1" => {
-                return Err(miette::miette!(
-                    "The `change-ps1` field is deprecated. Please use the `shell.change-ps1` field instead."
-                ));
-            }
-            "force-activate" => {
-                return Err(miette::miette!(
-                    "The `force-activate` field is deprecated. Please use the `shell.force-activate` field instead."
-                ));
+            "change-ps1" | "force-activate" => {
+                return Err(SetConfigError::Deprecated {
+                    key: key.to_string(),
+                });
             }
             "tool-platform" => {
                 self.tool_platform = value
                     .as_deref()
-                    .map(Platform::from_str)
+                    .map(Subdir::from_str)
                     .transpose()
-                    .into_diagnostic()?;
+                    .map_err(invalid_value(key))?;
             }
             key if key.starts_with("index-config") => {
                 if key == "index-config" {
                     self.index_config = value
                         .map(|v| serde_json::de::from_str(&v))
                         .transpose()
-                        .into_diagnostic()?
+                        .map_err(invalid_value(key))?
                         .unwrap_or_default();
                     return Ok(());
                 } else if !key.starts_with("index-config.") {
@@ -2478,12 +2541,10 @@ impl Config {
                 let subkey = key.strip_prefix("index-config.").unwrap();
                 match subkey {
                     "write-zst" => {
-                        self.index_config.default.write_zst =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.index_config.default.write_zst = parse_opt(value, key)?;
                     }
                     "write-shards" => {
-                        self.index_config.default.write_shards =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.index_config.default.write_shards = parse_opt(value, key)?;
                     }
                     "base-url" => {
                         self.index_config.default.base_url = value;
@@ -2498,7 +2559,7 @@ impl Config {
                     self.repodata_config = value
                         .map(|v| serde_json::de::from_str(&v))
                         .transpose()
-                        .into_diagnostic()?
+                        .map_err(invalid_value(key))?
                         .unwrap_or_default();
                     return Ok(());
                 } else if !key.starts_with("repodata-config.") {
@@ -2508,16 +2569,13 @@ impl Config {
                 let subkey = key.strip_prefix("repodata-config.").unwrap();
                 match subkey {
                     "disable-bzip2" => {
-                        self.repodata_config.default.disable_bzip2 =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.repodata_config.default.disable_bzip2 = parse_opt(value, key)?;
                     }
                     "disable-zstd" => {
-                        self.repodata_config.default.disable_zstd =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.repodata_config.default.disable_zstd = parse_opt(value, key)?;
                     }
                     "disable-sharded" => {
-                        self.repodata_config.default.disable_sharded =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.repodata_config.default.disable_sharded = parse_opt(value, key)?;
                     }
                     _ => return Err(err),
                 }
@@ -2525,7 +2583,8 @@ impl Config {
             key if key.starts_with("pypi-config") => {
                 if key == "pypi-config" {
                     if let Some(value) = value {
-                        self.pypi_config = serde_json::de::from_str(&value).into_diagnostic()?;
+                        self.pypi_config =
+                            serde_json::de::from_str(&value).map_err(invalid_value(key))?;
                     } else {
                         self.pypi_config = PyPIConfig::default();
                     }
@@ -2540,21 +2599,20 @@ impl Config {
                         self.pypi_config.index_url = value
                             .map(|v| Url::parse(&v))
                             .transpose()
-                            .into_diagnostic()?;
+                            .map_err(invalid_value(key))?;
                     }
                     "extra-index-urls" => {
                         self.pypi_config.extra_index_urls = value
                             .map(|v| serde_json::de::from_str(&v))
                             .transpose()
-                            .into_diagnostic()?
+                            .map_err(invalid_value(key))?
                             .unwrap_or_default();
                     }
                     "keyring-provider" => {
                         self.pypi_config.keyring_provider = value
-                            .map(|v| match v.as_str() {
-                                "disabled" => Ok(KeyringProvider::Disabled),
-                                "subprocess" => Ok(KeyringProvider::Subprocess),
-                                _ => Err(miette::miette!("invalid keyring provider")),
+                            .map(|v| {
+                                KeyringProvider::deserialize(v.into_deserializer())
+                                    .map_err(invalid_value::<serde::de::value::Error>(key))
                             })
                             .transpose()?;
                     }
@@ -2562,7 +2620,7 @@ impl Config {
                         self.pypi_config.allow_insecure_host = value
                             .map(|v| serde_json::de::from_str(&v))
                             .transpose()
-                            .into_diagnostic()?
+                            .map_err(invalid_value(key))?
                             .unwrap_or_default();
                     }
                     _ => return Err(err),
@@ -2571,9 +2629,10 @@ impl Config {
             key if key.starts_with("s3-options") => {
                 if key == "s3-options" {
                     if let Some(value) = value {
-                        self.s3_options = serde_json::de::from_str(&value).into_diagnostic()?;
+                        self.s3_options =
+                            serde_json::de::from_str(&value).map_err(invalid_value(key))?;
                     } else {
-                        return Err(miette!("s3-options requires a value"));
+                        return Err(missing);
                     }
                     return Ok(());
                 }
@@ -2586,49 +2645,45 @@ impl Config {
                             "endpoint-url" => {
                                 if let Some(value) = value {
                                     bucket_config.endpoint_url =
-                                        Url::parse(&value).into_diagnostic()?;
+                                        Url::parse(&value).map_err(invalid_value(key))?;
                                 } else {
-                                    return Err(miette!(
-                                        "s3-options.{}.endpoint-url requires a value",
-                                        bucket
-                                    ));
+                                    return Err(missing);
                                 }
                             }
                             "region" => {
                                 if let Some(value) = value {
                                     bucket_config.region = value;
                                 } else {
-                                    return Err(miette!(
-                                        "s3-options.{}.region requires a value",
-                                        bucket
-                                    ));
+                                    return Err(missing);
                                 }
                             }
-                            "force-path-style" => {
+                            "addressing-style" => {
                                 if let Some(value) = value {
-                                    bucket_config.force_path_style =
-                                        value.parse().into_diagnostic()?;
+                                    bucket_config.addressing_style =
+                                        S3AddressingStyle::deserialize(value.into_deserializer())
+                                            .map_err(invalid_value::<serde::de::value::Error>(
+                                                key,
+                                            ))?;
                                 } else {
-                                    return Err(miette!(
-                                        "s3-options.{}.force-path-style requires a value",
-                                        bucket
-                                    ));
+                                    return Err(missing);
                                 }
                             }
                             _ => return Err(err),
                         }
                     }
                 } else {
-                    let value = value.ok_or_else(|| miette!("s3-options requires a value"))?;
+                    let value = value.ok_or(missing)?;
                     let s3_options: S3Options =
-                        serde_json::de::from_str(&value).into_diagnostic()?;
+                        serde_json::de::from_str(&value).map_err(invalid_value(key))?;
                     self.s3_options.0.insert(subkey.to_string(), s3_options);
                 }
             }
             key if key.starts_with("azure-options") => {
                 if key == "azure-options" {
                     self.azure_options = match value {
-                        Some(value) => serde_json::de::from_str(&value).into_diagnostic()?,
+                        Some(value) => {
+                            serde_json::de::from_str(&value).map_err(invalid_value(key))?
+                        }
                         // Unsetting the whole table revokes every grant, which is
                         // the safe direction: absent means anonymous.
                         None => AzureOptionsMap::default(),
@@ -2641,12 +2696,13 @@ impl Config {
 
                 let (endpoint, field) = AzureConfigField::split(subkey)?;
                 let endpoint = AzureEndpointKey::parse(endpoint.trim_matches('"'))
-                    .map_err(|e| miette!("`{key}` does not name a valid Azure endpoint: {e}"))?;
+                    .map_err(invalid_value(key))?;
 
                 let Some(field) = field else {
                     match value {
                         Some(value) => {
-                            let options = serde_json::de::from_str(&value).into_diagnostic()?;
+                            let options =
+                                serde_json::de::from_str(&value).map_err(invalid_value(key))?;
                             self.azure_options.insert(endpoint, options);
                         }
                         None => {
@@ -2677,20 +2733,16 @@ impl Config {
                         auth.shift_remove(&container);
                     }
                     (AzureConfigField::Auth(container), Some(value)) => {
-                        auth.insert(container, value.parse::<bool>().into_diagnostic()?.into());
+                        auth.insert(
+                            container,
+                            value.parse::<bool>().map_err(invalid_value(key))?.into(),
+                        );
                     }
                     // Unsetting the scheme restores https, the conservative choice.
                     (AzureConfigField::Scheme, None) => scheme = AzureScheme::default(),
                     (AzureConfigField::Scheme, Some(value)) => {
-                        scheme = match value.as_str() {
-                            "https" => AzureScheme::Https,
-                            "http" => AzureScheme::Http,
-                            other => {
-                                return Err(miette!(
-                                    "`{key}` must be \"https\" or \"http\", not {other:?}"
-                                ));
-                            }
-                        };
+                        scheme = AzureScheme::deserialize(value.into_deserializer())
+                            .map_err(invalid_value::<serde::de::value::Error>(key))?;
                     }
                 }
                 self.azure_options
@@ -2699,7 +2751,8 @@ impl Config {
             key if key.starts_with(EXPERIMENTAL) => {
                 if key == EXPERIMENTAL {
                     if let Some(value) = value {
-                        self.experimental = serde_json::de::from_str(&value).into_diagnostic()?;
+                        self.experimental =
+                            serde_json::de::from_str(&value).map_err(invalid_value(key))?;
                     } else {
                         self.experimental = ExperimentalConfig::default();
                     }
@@ -2713,12 +2766,10 @@ impl Config {
                     .unwrap();
                 match subkey {
                     "use-environment-activation-cache" => {
-                        self.experimental.use_environment_activation_cache =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.experimental.use_environment_activation_cache = parse_opt(value, key)?;
                     }
                     "conda-script" => {
-                        self.experimental.conda_script =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.experimental.conda_script = parse_opt(value, key)?;
                     }
                     _ => return Err(err),
                 }
@@ -2726,9 +2777,10 @@ impl Config {
             key if key.starts_with("concurrency") => {
                 if key == "concurrency" {
                     if let Some(value) = value {
-                        self.pypi_config = serde_json::de::from_str(&value).into_diagnostic()?;
+                        self.concurrency =
+                            serde_json::de::from_str(&value).map_err(invalid_value(key))?;
                     } else {
-                        self.pypi_config = PyPIConfig::default();
+                        self.concurrency = ConcurrencyConfig::default();
                     }
                     return Ok(());
                 } else if !key.starts_with("concurrency.") {
@@ -2738,23 +2790,24 @@ impl Config {
                 match subkey {
                     "solves" => {
                         if let Some(value) = value {
-                            self.concurrency.solves = value.parse().into_diagnostic()?;
+                            self.concurrency.solves = value.parse().map_err(invalid_value(key))?;
                         } else {
-                            return Err(miette!("'solves' requires a number value"));
+                            return Err(missing);
                         }
                     }
                     "downloads" => {
                         if let Some(value) = value {
-                            self.concurrency.downloads = value.parse().into_diagnostic()?;
+                            self.concurrency.downloads =
+                                value.parse().map_err(invalid_value(key))?;
                         } else {
-                            return Err(miette!("'downloads' requires a number value"));
+                            return Err(missing);
                         }
                     }
                     "builds" => {
                         if let Some(value) = value {
-                            self.concurrency.builds = value.parse().into_diagnostic()?;
+                            self.concurrency.builds = value.parse().map_err(invalid_value(key))?;
                         } else {
-                            return Err(miette!("'builds' requires a number value"));
+                            return Err(missing);
                         }
                     }
                     _ => return Err(err),
@@ -2763,7 +2816,8 @@ impl Config {
             key if key.starts_with("shell") => {
                 if key == "shell" {
                     if let Some(value) = value {
-                        self.shell = serde_json::de::from_str(&value).into_diagnostic()?;
+                        self.shell =
+                            serde_json::de::from_str(&value).map_err(invalid_value(key))?;
                     } else {
                         self.shell = ShellConfig::default();
                     }
@@ -2774,45 +2828,37 @@ impl Config {
                 let subkey = key.strip_prefix("shell.").unwrap();
                 match subkey {
                     "force-activate" => {
-                        self.shell.force_activate =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.shell.force_activate = parse_opt(value, key)?;
                     }
                     "source-completion-scripts" => {
-                        self.shell.source_completion_scripts =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.shell.source_completion_scripts = parse_opt(value, key)?;
                     }
                     "change-ps1" => {
-                        self.shell.change_ps1 =
-                            value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                        self.shell.change_ps1 = parse_opt(value, key)?;
                     }
                     _ => return Err(err),
                 }
             }
             key if key.starts_with("run-post-link-scripts") => {
                 if let Some(value) = value {
-                    self.run_post_link_scripts = Some(
-                        value
-                            .parse()
-                            .into_diagnostic()
-                            .wrap_err("failed to parse run-post-link-scripts")?,
-                    );
+                    self.run_post_link_scripts = Some(value.parse().map_err(invalid_value(key))?);
                 }
                 return Ok(());
             }
             "allow-symbolic-links" => {
-                self.allow_symbolic_links =
-                    value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                self.allow_symbolic_links = parse_opt(value, key)?;
             }
             "allow-hard-links" => {
-                self.allow_hard_links = value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                self.allow_hard_links = parse_opt(value, key)?;
             }
             "allow-ref-links" => {
-                self.allow_ref_links = value.map(|v| v.parse()).transpose().into_diagnostic()?;
+                self.allow_ref_links = parse_opt(value, key)?;
             }
             key if key.starts_with("proxy-config") => {
                 if key == "proxy-config" {
                     if let Some(value) = value {
-                        self.proxy_config = serde_json::de::from_str(&value).into_diagnostic()?;
+                        self.proxy_config =
+                            serde_json::de::from_str(&value).map_err(invalid_value(key))?;
                     } else {
                         self.proxy_config = ProxyConfig::default();
                     }
@@ -2827,19 +2873,19 @@ impl Config {
                         self.proxy_config.https = value
                             .map(|v| Url::parse(&v))
                             .transpose()
-                            .into_diagnostic()?;
+                            .map_err(invalid_value(key))?;
                     }
                     "http" => {
                         self.proxy_config.http = value
                             .map(|v| Url::parse(&v))
                             .transpose()
-                            .into_diagnostic()?;
+                            .map_err(invalid_value(key))?;
                     }
                     "non-proxy-hosts" => {
                         self.proxy_config.non_proxy_hosts = value
                             .map(|v| serde_json::de::from_str(&v))
                             .transpose()
-                            .into_diagnostic()?
+                            .map_err(invalid_value(key))?
                             .unwrap_or_default();
                     }
                     _ => return Err(err),
@@ -2848,7 +2894,8 @@ impl Config {
             key if key.starts_with("cache") => {
                 if key == "cache" {
                     if let Some(value) = value {
-                        self.cache = serde_json::de::from_str(&value).into_diagnostic()?;
+                        self.cache =
+                            serde_json::de::from_str(&value).map_err(invalid_value(key))?;
                     } else {
                         self.cache = CacheConfig::default();
                     }
@@ -2876,7 +2923,7 @@ impl Config {
                         self.cache.netfs_redirect = value
                             .map(|v| NetfsRedirect::from_str(&v))
                             .transpose()
-                            .into_diagnostic()?
+                            .map_err(invalid_value(key))?
                             .unwrap_or_default();
                     }
                     _ => return Err(err),
@@ -2891,25 +2938,18 @@ impl Config {
     }
 
     /// Save the config to the given path.
-    pub fn save(&self, to: &Path) -> miette::Result<()> {
-        let contents = toml_edit::ser::to_string_pretty(&self).into_diagnostic()?;
+    pub fn save(&self, to: &Path) -> Result<(), SaveConfigError> {
+        let contents = toml_edit::ser::to_string_pretty(&self)?;
         tracing::debug!("Saving config to: {}", to.display());
 
         let parent = to.parent().expect("config path should have a parent");
-        fs_err::create_dir_all(parent)
-            .into_diagnostic()
-            .wrap_err(format!(
-                "failed to create directories in '{}'",
-                parent.display()
-            ))?;
-        fs_err::write(to, contents)
-            .into_diagnostic()
-            .wrap_err(format!("failed to write config to '{}'", to.display()))
+        fs_err::create_dir_all(parent)?;
+        Ok(fs_err::write(to, contents)?)
     }
 
     /// Resolve the cache directory for `kind`, applying this config's
     /// `[cache]` settings on top of the env-var / default resolution.
-    pub fn cache_dir_for(&self, kind: CacheKind) -> miette::Result<PathBuf> {
+    pub fn cache_dir_for(&self, kind: CacheKind) -> Result<PathBuf, CacheDirError> {
         resolve_cache_kind_dir(&self.cache, kind)
     }
 
@@ -2936,7 +2976,13 @@ impl Config {
                     s3_middleware::S3Config::Custom {
                         endpoint_url: v.endpoint_url.clone(),
                         region: v.region.clone(),
-                        force_path_style: v.force_path_style,
+                        addressing_style: match v.addressing_style {
+                            S3AddressingStyle::VirtualHost => {
+                                s3_middleware::S3AddressingStyle::VirtualHost
+                            }
+                            S3AddressingStyle::Path => s3_middleware::S3AddressingStyle::Path,
+                        },
+                        credentials_provider: None,
                     },
                 )
             })
@@ -3131,7 +3177,21 @@ UNUSED = "unused"
         let error_message = result.unwrap_err().to_string();
         assert_eq!(
             error_message,
-            "The `detached-environments` path must be an absolute path: ./relative_path/"
+            "`detached-environments` must be an absolute path, got: ./relative_path/"
+        );
+    }
+
+    /// `set` must reject a relative path, otherwise `pixi config set` writes a
+    /// file that fails validation on every later load.
+    #[test]
+    fn test_set_detached_environments_relative_path() {
+        let mut config = Config::default();
+        let err = config
+            .set("detached-environments", Some("rel/x".to_string()))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "`detached-environments` must be an absolute path, got: rel/x"
         );
     }
 
@@ -3396,7 +3456,7 @@ UNUSED = "unused"
             [s3-options.bucket1]
             endpoint-url = "https://my-s3-host"
             region = "us-east-1"
-            force-path-style = false
+            addressing-style = "path"
         "#;
         let (config, _) = Config::from_toml(toml, None).unwrap();
         let s3_options = config.s3_options.0;
@@ -3405,7 +3465,10 @@ UNUSED = "unused"
             Url::parse("https://my-s3-host").unwrap()
         );
         assert_eq!(s3_options["bucket1"].region, "us-east-1");
-        assert!(!s3_options["bucket1"].force_path_style);
+        assert_eq!(
+            s3_options["bucket1"].addressing_style,
+            S3AddressingStyle::Path
+        );
     }
 
     #[test]
@@ -3413,8 +3476,7 @@ UNUSED = "unused"
         let toml = r#"
             [s3-options.bucket1]
             endpoint-url = "https://my-s3-host"
-            region = "us-east-1"
-            # force-path-style = false
+            # region = "us-east-1"
         "#;
         let result = Config::from_toml(toml, None);
         assert!(result.is_err());
@@ -3423,7 +3485,7 @@ UNUSED = "unused"
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("missing field `force-path-style`")
+                .contains("missing field `region`")
         );
     }
 
@@ -3479,7 +3541,7 @@ UNUSED = "unused"
                 S3Options {
                     endpoint_url: Url::parse("https://my-s3-host").unwrap(),
                     region: "us-east-1".to_string(),
-                    force_path_style: false,
+                    addressing_style: S3AddressingStyle::VirtualHost,
                 },
             )])),
             azure_options: {
@@ -3739,7 +3801,7 @@ UNUSED = "unused"
                     S3Options {
                         endpoint_url: Url::parse("https://my-s3-host").unwrap(),
                         region: "us-east-1".to_string(),
-                        force_path_style: false,
+                        addressing_style: S3AddressingStyle::VirtualHost,
                     },
                 ),
                 (
@@ -3747,7 +3809,7 @@ UNUSED = "unused"
                     S3Options {
                         endpoint_url: Url::parse("https://my-s3-host").unwrap(),
                         region: "us-east-1".to_string(),
-                        force_path_style: false,
+                        addressing_style: S3AddressingStyle::VirtualHost,
                     },
                 ),
             ])),
@@ -3777,7 +3839,7 @@ UNUSED = "unused"
                 S3Options {
                     endpoint_url: Url::parse("https://my-new-s3-host").unwrap(),
                     region: "us-east-1".to_string(),
-                    force_path_style: false,
+                    addressing_style: S3AddressingStyle::VirtualHost,
                 },
             )])),
             ..Default::default()
@@ -3922,13 +3984,15 @@ UNUSED = "unused"
                 .as_path()
         );
 
+        // Must be absolute on every platform; `/path/to/envs` is not on Windows.
+        let envs_dir = std::env::temp_dir().join("envs");
         config
-            .set("detached-environments", Some("/path/to/envs".to_string()))
+            .set(
+                "detached-environments",
+                Some(envs_dir.to_string_lossy().into_owned()),
+            )
             .unwrap();
-        assert_eq!(
-            config.detached_environments_dir().unwrap(),
-            Some(PathBuf::from("/path/to/envs"))
-        );
+        assert_eq!(config.detached_environments_dir().unwrap(), Some(envs_dir));
 
         config
             .set("mirrors", Some(r#"{"https://conda.anaconda.org/conda-forge": ["https://prefix.dev/conda-forge"]}"#.to_string()))
@@ -4000,7 +4064,7 @@ UNUSED = "unused"
             .unwrap();
         assert_eq!(config.max_concurrent_builds(), 4);
 
-        config.set("s3-options.my-bucket", Some(r#"{"endpoint-url": "http://localhost:9000", "force-path-style": true, "region": "auto"}"#.to_string())).unwrap();
+        config.set("s3-options.my-bucket", Some(r#"{"endpoint-url": "http://localhost:9000", "addressing-style": "path", "region": "auto"}"#.to_string())).unwrap();
         let s3_options = config.s3_options.0.get("my-bucket").unwrap();
         assert!(
             s3_options
@@ -4008,14 +4072,14 @@ UNUSED = "unused"
                 .to_string()
                 .contains("http://localhost:9000")
         );
-        assert!(s3_options.force_path_style);
+        assert_eq!(s3_options.addressing_style, S3AddressingStyle::Path);
         assert_eq!(s3_options.region, "auto");
 
         // Test tool-platform
         config
             .set("tool-platform", Some("linux-64".to_string()))
             .unwrap();
-        assert_eq!(config.tool_platform, Some(Platform::Linux64));
+        assert_eq!(config.tool_platform, Some(Subdir::Linux64));
 
         // Test run-post-link-scripts
         config
@@ -4138,8 +4202,8 @@ UNUSED = "unused"
             .unwrap();
         config
             .set(
-                "s3-options.test-bucket.force-path-style",
-                Some("false".to_string()),
+                "s3-options.test-bucket.addressing-style",
+                Some("virtual-host".to_string()),
             )
             .unwrap();
 
@@ -4157,6 +4221,35 @@ UNUSED = "unused"
         // Test max-concurrent-solves (legacy accessor)
         assert_eq!(config.max_concurrent_solves(), 5);
         assert_eq!(config.max_concurrent_downloads(), 25);
+
+        // Test concurrency full update (issue #6666)
+        config.pypi_config.index_url = Some(Url::parse("https://my-index.test").unwrap());
+        config
+            .set(
+                "concurrency",
+                Some(r#"{"solves": 10, "downloads": 50}"#.to_string()),
+            )
+            .unwrap();
+        assert_eq!(config.concurrency.solves, 10);
+        assert_eq!(config.concurrency.downloads, 50);
+        assert_eq!(
+            config.pypi_config.index_url,
+            Some(Url::parse("https://my-index.test").unwrap())
+        );
+
+        config.set("concurrency", None).unwrap();
+        assert_eq!(
+            config.concurrency.solves,
+            ConcurrencyConfig::default().solves
+        );
+        assert_eq!(
+            config.concurrency.downloads,
+            ConcurrencyConfig::default().downloads
+        );
+        assert_eq!(
+            config.pypi_config.index_url,
+            Some(Url::parse("https://my-index.test").unwrap())
+        );
 
         // Test tls-no-verify
         config
@@ -4189,7 +4282,10 @@ UNUSED = "unused"
 
         // Test detached-environments
         config
-            .set("detached-environments", Some("/custom/path".to_string()))
+            .set(
+                "detached-environments",
+                Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            )
             .unwrap();
         assert!(matches!(
             config.detached_environments,
@@ -4356,6 +4452,23 @@ UNUSED = "unused"
         assert!(rattler_config::config::Config::is_default(
             &loaded.azure_options
         ));
+    }
+
+    #[test]
+    fn test_set_errors_name_the_key() {
+        let mut config = Config::default();
+
+        let err = config.set("offline", Some("maybe".into())).unwrap_err();
+        assert_eq!(err.to_string(), "invalid value for `offline`");
+        assert_eq!(
+            std::error::Error::source(&err).unwrap().to_string(),
+            "provided string was not `true` or `false`"
+        );
+
+        for key in ["s3-options", "s3-options.bucket", "concurrency.solves"] {
+            let err = config.set(key, None).unwrap_err();
+            assert_eq!(err.to_string(), format!("`{key}` requires a value"));
+        }
     }
 
     #[rstest]

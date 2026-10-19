@@ -6,7 +6,7 @@ use std::{
 };
 
 use pixi_record::PixiRecord;
-use rattler_conda_types::{PackageName, VersionWithSource};
+use rattler_conda_types::{PackageName, VersionWithSource, package::BuildString};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::Xxh3;
 
@@ -44,7 +44,7 @@ pub struct PackageBackend {
     pub command: String,
     pub name: PackageName,
     pub version: VersionWithSource,
-    pub build: String,
+    pub build: BuildString,
     pub env_digest: EnvDigest,
 }
 
