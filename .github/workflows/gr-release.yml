@@ -79,5 +79,5 @@ jobs:
               --tag "$IMAGE:$VERSION-$base" --tag "$IMAGE:$base"
           done
         env:
-          IMAGE: ghcr.io/greenroom-robotics/pixi-gr
+          IMAGE: ghcr.io/greenroom-robotics/pixi
           VERSION: ${{ steps.release.outputs.version }}
