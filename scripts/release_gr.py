@@ -9,7 +9,8 @@ Steps:
     1. Take the version from --version, or bump the latest `pixi-gr@` tag from
        the conventional commits since it with git-cliff.
     2. Cross-build `pixi` for linux-64 and linux-aarch64 with cargo-zigbuild.
-    3. gzip each binary to staging/pixi-<arch>.gz.
+    3. gzip each binary to staging/pixi-<arch>.gz, and stage it raw as
+       staging/pixi-<docker arch> for the image build.
     4. Rewrite the default VERSION in install.sh to match, and commit if it moved.
     5. Tag `pixi-gr@<version>` at HEAD and push.
     6. Create the GitHub release with install.sh, both binaries and the PRs
@@ -33,11 +34,11 @@ STAGING = ROOT / "staging"
 INSTALL_SH = ROOT / "install.sh"
 REPO = "greenroom-robotics/pixi"
 
-# Release asset name -> rust target triple. musl keeps the binary static so it
-# runs on whatever glibc the fleet happens to have.
+# Release asset name -> (rust target triple, docker arch). musl keeps the
+# binary static so it runs on whatever glibc the fleet happens to have.
 TARGETS = {
-    "linux-64": "x86_64-unknown-linux-musl",
-    "linux-aarch64": "aarch64-unknown-linux-musl",
+    "linux-64": ("x86_64-unknown-linux-musl", "amd64"),
+    "linux-aarch64": ("aarch64-unknown-linux-musl", "arm64"),
 }
 
 
@@ -97,7 +98,7 @@ def build(target: str, version: str, dry_run: bool) -> Path:
     return ROOT / "target" / target / "release" / "pixi"
 
 
-def package(binary: Path, arch: str, dry_run: bool) -> Path:
+def package(binary: Path, arch: str, docker_arch: str, dry_run: bool) -> Path:
     dest = STAGING / f"pixi-{arch}.gz"
     print(f"  -> gzip {binary} -> {dest}", flush=True)
     if dry_run:
@@ -107,6 +108,7 @@ def package(binary: Path, arch: str, dry_run: bool) -> Path:
     STAGING.mkdir(parents=True, exist_ok=True)
     with binary.open("rb") as src, gzip.open(dest, "wb") as out:
         shutil.copyfileobj(src, out)
+    shutil.copy2(binary, STAGING / f"pixi-{docker_arch}")
     return dest
 
 
@@ -151,8 +153,8 @@ def main() -> None:
         run(["git", "commit", "-m", f"chore: point install.sh at {tag}"])
 
     assets = [INSTALL_SH]
-    for arch, target in TARGETS.items():
-        assets.append(package(build(target, version, args.dry_run), arch, args.dry_run))
+    for arch, (target, docker_arch) in TARGETS.items():
+        assets.append(package(build(target, version, args.dry_run), arch, docker_arch, args.dry_run))
 
     existing = subprocess.run(
         ["git", "rev-parse", f"{tag}^{{commit}}"], capture_output=True, text=True
@@ -181,6 +183,9 @@ def main() -> None:
         ],
         args.dry_run,
     )
+    if github_output := os.environ.get("GITHUB_OUTPUT"):
+        with open(github_output, "a") as out:
+            out.write(f"version={version}\n")
     print(f"\nDone: https://github.com/{REPO}/releases/tag/{tag}")
 
 
