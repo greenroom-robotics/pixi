@@ -23,6 +23,7 @@ rattler_conda_types = { workspace = true }
 rattler_azure = { workspace = true }
 rattler_config = { workspace = true }
 rattler_networking = { workspace = true, features = ["s3"] }
+rattler_redaction = { workspace = true }
 rattler_repodata_gateway = { workspace = true, features = ["gateway"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
