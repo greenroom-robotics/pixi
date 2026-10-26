@@ -14,6 +14,8 @@ pixi publish [OPTIONS]
 ```
 
 ## Options
+- <a id="arg---allow-source-dependencies" href="#arg---allow-source-dependencies">`--allow-source-dependencies`</a>
+:  Publish a single package even when some of its run dependencies are source dependencies. The published package depends on them by name, so they must be resolvable from a channel at install time
 - <a id="arg---target-platform" href="#arg---target-platform">`--target-platform (-t) <TARGET_PLATFORM>`</a>
 :  The target platform to build for (defaults to the current platform)
 <br>**default**: `current_platform`

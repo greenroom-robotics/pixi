@@ -362,6 +362,30 @@ def test_path_option_publishes_only_that_package(pixi: Path, tmp_pixi_workspace:
 
 
 @pytest.mark.slow
+def test_allow_source_dependencies_publishes_only_that_package(
+    pixi: Path, tmp_pixi_workspace: Path
+) -> None:
+    """`--allow-source-dependencies` lifts the self-contained check of `--path`.
+
+    A single-package publish with a source run dependency is refused by
+    default; with the flag only the target's artifact is produced.
+    """
+    write_workspace(tmp_pixi_workspace, {"alpha": Pkg(run=["bravo"]), "bravo": Pkg()})
+    verify_cli_command(
+        [pixi, "publish", "--path", "alpha", "--target-dir", str(tmp_pixi_workspace.joinpath("x"))],
+        ExitCode.FAILURE,
+        cwd=tmp_pixi_workspace,
+        stderr_contains="source run dependencies",
+    )
+
+    _, target_dir = publish_to_dir(
+        pixi, tmp_pixi_workspace, args=["--path", "alpha", "--allow-source-dependencies"]
+    )
+
+    assert built_package_names(target_dir) == ["alpha"]
+
+
+@pytest.mark.slow
 def test_workspace_without_opted_in_packages_falls_back(
     pixi: Path, tmp_pixi_workspace: Path
 ) -> None:

@@ -79,10 +79,10 @@ pub struct Args {
     #[clap(skip)]
     pub backend_override: Option<BackendOverride>,
 
-    /// Skip the self-contained check of a single-package publish. Set by the
-    /// deprecated `pixi build` delegation, which historically built packages
-    /// with source dependencies.
-    #[clap(skip)]
+    /// Publish a single package even when some of its run dependencies are
+    /// source dependencies. The published package depends on them by name, so
+    /// they must be resolvable from a channel at install time.
+    #[clap(long)]
     pub allow_source_dependencies: bool,
 
     /// The target platform to build for (defaults to the current platform)
@@ -114,8 +114,8 @@ pub struct Args {
     /// When given, only that package is built and published - whether or not
     /// it sets `publish = true`. The package must be self-contained:
     /// publishing it alone fails if any of its run dependencies is a source
-    /// dependency. Build and host source dependencies are only consumed
-    /// while building and are fine.
+    /// dependency, unless `--allow-source-dependencies` is given. Build and
+    /// host source dependencies are only consumed while building and are fine.
     ///
     /// Supported manifest files: `package.xml`, `recipe.yaml`, `pixi.toml`, `pyproject.toml`, or `mojoproject.toml`.
     #[arg(long)]
@@ -863,7 +863,9 @@ pub async fn execute(args: Args) -> miette::Result<()> {
                     help = "A single-package publish must be self-contained. Set \
                             `publish = true` in the `[package]` section of the package and \
                             its source dependencies, then run `pixi publish` without `--path` \
-                            to publish them together.",
+                            to publish them together, or pass \
+                            `--allow-source-dependencies` if they are available from a \
+                            channel.",
                     "{message}",
                 )
                 .into());
