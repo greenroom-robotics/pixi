@@ -1,10 +1,10 @@
 #!/bin/sh
 # Install the GR pixi fork (native az:// Azure Blob channel support) as `pixi`.
-#   curl -fsSL https://github.com/greenroom-robotics/pixi/releases/download/pixi-gr@0.82.3/install.sh | sh
+#   curl -fsSL https://github.com/greenroom-robotics/pixi/releases/download/pixi-gr@0.83.0/install.sh | sh
 # Override version/dest with PIXI_GR_VERSION / PIXI_GR_BIN_DIR.
 set -eu
 
-VERSION="${PIXI_GR_VERSION:-0.82.3}"
+VERSION="${PIXI_GR_VERSION:-0.83.0}"
 DEST="${PIXI_GR_BIN_DIR:-${PIXI_HOME:-$HOME/.pixi}/bin}"
 
 case "$(uname -m)" in
