@@ -72,10 +72,11 @@ jobs:
 
       - name: Push images
         run: |
-          for base in bookworm trixie; do
+          for entry in bookworm=debian:bookworm-slim trixie=debian:trixie-slim resolute=ubuntu:26.04; do
+            base=${entry%%=*}
             docker buildx build staging --file docker/Dockerfile --push \
               --platform linux/amd64,linux/arm64 \
-              --build-arg BASE_IMAGE="debian:$base-slim" \
+              --build-arg BASE_IMAGE="${entry#*=}" \
               --tag "$IMAGE:$VERSION-$base" --tag "$IMAGE:$base"
           done
         env:
