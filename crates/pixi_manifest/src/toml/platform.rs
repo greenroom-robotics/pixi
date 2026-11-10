@@ -455,15 +455,18 @@ fn build_friendly_virtual_package(
                     line_info: None,
                 });
             }
-            crate::platform::validate_archspec_name(microarch).map_err(|message| Error {
-                kind: ErrorKind::Custom(message.into()),
-                span: raw.span,
-                line_info: None,
-            })?;
+            let build_string =
+                crate::platform::parse_archspec_build_string(microarch).map_err(|message| {
+                    Error {
+                        kind: ErrorKind::Custom(message.into()),
+                        span: raw.span,
+                        line_info: None,
+                    }
+                })?;
             Ok(GenericVirtualPackage {
                 name: package_name,
                 version,
-                build_string: BuildString::new_unchecked(microarch),
+                build_string,
             })
         }
         VirtualPackageValueKind::Presence => {
@@ -477,7 +480,7 @@ fn build_friendly_virtual_package(
             Ok(GenericVirtualPackage {
                 name: package_name,
                 version: Version::major(0),
-                build_string: BuildString::new_unchecked(""),
+                build_string: BuildString::new_unchecked("0"),
             })
         }
     }
@@ -573,7 +576,7 @@ fn take_amdgpu_entry<'de>(
     let presence = GenericVirtualPackage {
         name: PackageName::try_from("__amdgpu").expect("static virtual-package name is valid"),
         version: Version::major(0),
-        build_string: BuildString::new_unchecked(""),
+        build_string: BuildString::new_unchecked("0"),
     };
     match value.take() {
         ValueInner::Boolean(true) => Ok(vec![presence]),
@@ -600,7 +603,7 @@ fn take_amdgpu_entry<'de>(
                     name: PackageName::try_from("__amdgpu_arch")
                         .expect("static virtual-package name is valid"),
                     version,
-                    build_string: BuildString::new_unchecked(""),
+                    build_string: BuildString::new_unchecked("0"),
                 },
             ])
         }
@@ -931,12 +934,7 @@ fn classify_virtual_packages(
             {
                 package.version.to_string()
             } else {
-                let build = if package.build_string.is_empty() {
-                    "0"
-                } else {
-                    package.build_string.as_str()
-                };
-                format!("{}={build}", package.version)
+                format!("{}={}", package.version, package.build_string)
             };
             (package.name.as_normalized().to_string(), value)
         })
@@ -1301,15 +1299,15 @@ mod test {
         assert_eq!(restored.platform.subdir(), Subdir::Linux64);
         let restored_records = restored.platform.manifest_virtual_package_records();
         for (name, version, build) in [
-            ("__win", "10", ""),
-            ("__osx", "14", ""),
+            ("__win", "10", "0"),
+            ("__osx", "14", "0"),
             ("__name", "1", "h1"),
             ("__platform", "2", "h2"),
             ("__windows", "3", "h3"),
             ("__macos", "4", "h4"),
             ("__site_service", "2", "h1"),
             ("__amdgpu", "0", "h1"),
-            ("__amdgpu_arch", "9.0.16", ""),
+            ("__amdgpu_arch", "9.0.16", "0"),
             ("__cuda", "12.0", "h1"),
             ("__cuda_arch", "8.6", "h2"),
             ("__archspec", "5", "zen2"),
@@ -1657,7 +1655,7 @@ mod test {
         GenericVirtualPackage {
             name: PackageName::try_from(name).unwrap(),
             version: Version::from_str(version).unwrap(),
-            build_string: BuildString::new_unchecked(""),
+            build_string: BuildString::new_unchecked("0"),
         }
     }
 

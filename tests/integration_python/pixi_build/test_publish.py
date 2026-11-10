@@ -587,10 +587,11 @@ def test_host_dep_member_is_built_only_once(pixi: Path, tmp_pixi_workspace: Path
             "bravo": Pkg(),
         },
     )
-    output, _ = publish_to_dir(pixi, tmp_pixi_workspace)
+    output, _ = publish_to_dir(pixi, tmp_pixi_workspace, args=["-v"])
 
     # The backend logs one "Running build for recipe:" line per package it
     # actually builds; cache hits produce none. Two packages, two builds.
+    # Backend output only reaches stderr at `-v` and above.
     assert output.stderr.count("Running build for recipe") == 2, output.stderr
 
 
@@ -609,7 +610,7 @@ def test_build_dep_member_is_built_only_once(pixi: Path, tmp_pixi_workspace: Pat
             "bravo": Pkg(),
         },
     )
-    output, _ = publish_to_dir(pixi, tmp_pixi_workspace)
+    output, _ = publish_to_dir(pixi, tmp_pixi_workspace, args=["-v"])
 
     assert output.stderr.count("Running build for recipe") == 2, output.stderr
 
