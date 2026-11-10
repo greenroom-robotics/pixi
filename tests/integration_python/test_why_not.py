@@ -21,5 +21,5 @@ package = "==0.1.0"
     verify_cli_command([pixi, "lock", "--manifest-path", manifest_path])
     verify_cli_command(
         [pixi, "why-not", "package>=0.2.0", "--manifest-path", manifest_path],
-        stdout_contains=f"Cannot solve default for {CURRENT_PLATFORM} with package >=0.2.0:",
+        stdout_contains=f"Cannot solve default for {CURRENT_PLATFORM} with package >=0.2.0",
     )

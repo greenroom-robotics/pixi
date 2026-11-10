@@ -397,7 +397,7 @@ fn unique_dev_source_url(dev_source: &pixi_record::DevSourceRecord) -> Url {
 
 /// Generates a unique build string for a dev source record based on its variants.
 /// Uses a hash of the variants to ensure uniqueness when multiple variants exist.
-fn dev_source_build_string(dev_source: &pixi_record::DevSourceRecord) -> String {
+fn dev_source_build_string(dev_source: &pixi_record::DevSourceRecord) -> BuildString {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -406,6 +406,8 @@ fn dev_source_build_string(dev_source: &pixi_record::DevSourceRecord) -> String 
     dev_source.variants.hash(&mut hasher);
     let hash = hasher.finish();
     format!("{hash:x}")
+        .parse()
+        .expect("a hex hash is a valid build string")
 }
 
 #[derive(Debug, thiserror::Error)]

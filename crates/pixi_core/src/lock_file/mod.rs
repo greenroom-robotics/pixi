@@ -29,9 +29,10 @@ pub use satisfiability::{
 };
 pub use update::{
     LoadLockFileError, LockFileDerivedData, LockFileVersionMismatchError, PackageFilterNames,
-    ProbeOutcome, ReinstallEnvironment, ReinstallPackages, SolveCondaEnvironmentError,
-    UpdateContext, UpdateLockFileOptions, UpdateMode, UpdatePrefixError, UpdatedPrefix,
-    WriteLockFileError, probe_conda_solve,
+    ProbeCondaSolveError, ProbeOutcome, ReinstallEnvironment, ReinstallPackages,
+    SolveCondaEnvironmentError, UnsupportedPypiPlatformError, UpdateContext, UpdateLockFileError,
+    UpdateLockFileOptions, UpdateMode, UpdatePrefixError, UpdatedPrefix, WriteLockFileError,
+    probe_conda_solve,
 };
 pub use utils::{LockedPackageKind, filter_lock_file};
 

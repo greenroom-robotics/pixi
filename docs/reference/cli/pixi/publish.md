@@ -15,7 +15,7 @@ pixi publish [OPTIONS]
 
 ## Options
 - <a id="arg---allow-source-dependencies" href="#arg---allow-source-dependencies">`--allow-source-dependencies`</a>
-:  Publish a single package even when some of its run dependencies are source dependencies. The published package depends on them by name, so they must be resolvable from a channel at install time
+:  Publish the packages given with `--path` even when some of their run dependencies are source dependencies outside of them. The published packages depend on them by name, so they must be resolvable from a channel at install time
 - <a id="arg---target-platform" href="#arg---target-platform">`--target-platform (-t) <TARGET_PLATFORM>`</a>
 :  The target platform to build for (defaults to the current platform)
 <br>**default**: `current_platform`
@@ -32,6 +32,7 @@ pixi publish [OPTIONS]
 :  Whether to clean the build directory before building
 - <a id="arg---path" href="#arg---path">`--path <PATH>`</a>
 :  The path to a directory containing a package manifest, or to a specific manifest file
+<br>May be provided more than once.
 - <a id="arg---target-channel" href="#arg---target-channel">`--target-channel <TARGET_CHANNEL>`</a>
 :  The target channel to publish packages to. Accepts a URL (prefix.dev, anaconda.org, cloudsmith://, s3://, quetz://, artifactory://) or a local filesystem path / `file://` URL for an indexed local channel
 <br>**aliases**: to
@@ -110,7 +111,7 @@ copies them into a local directory (`--target-dir`). Every source
 dependency of a published package must itself opt into publishing; the
 publish fails otherwise. When no package opts in, the package at the
 current directory is published instead, as if `--path .` had been
-passed. Use `--path` to build and publish a single package.
+passed. Use `--path` to build and publish specific packages.
 
 Supported destinations for `--target-channel` (alias `--to`):
 
