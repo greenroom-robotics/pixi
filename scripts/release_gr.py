@@ -88,13 +88,11 @@ def build(target: str, version: str, dry_run: bool) -> Path:
     if target.startswith("aarch64-"):
         env_extra["JEMALLOC_SYS_WITH_LG_PAGE"] = "16"
     env = {**os.environ, **env_extra}
-    print(f"  -> cargo zigbuild --release --target {target} --bin pixi", flush=True)
-    if not dry_run:
-        subprocess.run(
-            ["cargo", "zigbuild", "--release", "--target", target, "--bin", "pixi"],
-            check=True,
-            env=env,
-        )
+    run(
+        ["cargo", "zigbuild", "--release", "--target", target, "--bin", "pixi", "--features", "self_update"],
+        dry_run,
+        env=env,
+    )
     return ROOT / "target" / target / "release" / "pixi"
 
 
