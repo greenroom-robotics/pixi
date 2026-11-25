@@ -19,7 +19,10 @@ pub use rattler_config::locations::{
     ConfigLayer, ConfigLocation, shared_system_config_path, shared_user_config_paths,
 };
 
+mod config_key;
 mod detector_decisions;
+use config_key::{AzureField, AzureKey, BucketSpelling, ConfigKeyKind, S3Bucket, S3Field, S3Key};
+pub use config_key::{ConfigKey, ConfigPath, KeySegment};
 pub use detector_decisions::{
     DetectorConfigError, consent_origin, repository_detector_config_path, write_detector_decision,
     write_repository_detector_decision,
@@ -978,56 +981,6 @@ pub use rattler_config::config::s3::{S3AddressingStyle, S3Options, S3OptionsMap}
 pub use rattler_azure::{Auth, AzureEndpointKey, AzureEndpointOptions, AzureScheme, ContainerName};
 pub use rattler_config::config::azure::AzureOptionsMap;
 
-/// The part of an `azure-options.<endpoint>…` config key that follows the endpoint.
-///
-/// An endpoint key is full of dots, so — unlike `s3-options.<bucket>.<field>` — the
-/// field cannot be found by splitting on the first one; it has to be peeled off the
-/// end by name, or the endpoint swallows it (or worse, loses its last label).
-///
-/// There is deliberately no variant for a bare `auth`. A grant belongs to one
-/// container, so the path only exists as a table of them, and the one edit whose
-/// blast radius would be every container on the account — including containers
-/// created after it was written — has nowhere to land.
-enum AzureConfigField {
-    /// `<endpoint>.auth.<container>` — whether that container may be sent credentials.
-    Auth(ContainerName),
-    /// `<endpoint>.scheme` — the scheme `az://` is rewritten to.
-    Scheme,
-}
-
-impl AzureConfigField {
-    /// Split an `azure-options.` subkey into the endpoint it names and the field it
-    /// addresses, if any.
-    ///
-    /// Neither a field name nor a container name can contain a dot, so a tail of
-    /// one or two segments is enough to recognise; everything before it is the
-    /// endpoint, quotes and all (`"host:10000/account".auth.releases`).
-    fn split(subkey: &str) -> Result<(&str, Option<Self>), SetConfigError> {
-        let Some((head, tail)) = subkey.rsplit_once('.') else {
-            return Ok((subkey, None));
-        };
-        match tail {
-            "scheme" => return Ok((head, Some(Self::Scheme))),
-            "auth" => {
-                return Err(SetConfigError::AzureEndpointWideGrant {
-                    endpoint: head.to_string(),
-                });
-            }
-            _ => {}
-        }
-        // Nothing recognisable at the end, so the tail is a container name only if
-        // the segment before it is `auth`; otherwise the whole subkey is the endpoint.
-        match head.rsplit_once('.') {
-            Some((endpoint, "auth")) => {
-                let container = ContainerName::new(tail)
-                    .map_err(invalid_value(&format!("azure-options.{subkey}")))?;
-                Ok((endpoint, Some(Self::Auth(container))))
-            }
-            _ => Ok((subkey, None)),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum DetachedEnvironments {
@@ -1899,11 +1852,49 @@ pub enum SetConfigError {
     #[error("The `{key}` field is deprecated. Please use the `shell.{key}` field instead.")]
     Deprecated { key: String },
     #[error(
-        "`azure-options.{endpoint}.auth` is a table of containers, not a value. Grant one \
-         container at a time with `azure-options.{endpoint}.auth.<container>`: Azure assigns \
-         access per container, so there is no host-wide grant to set."
+        "`azure-options.{endpoint}.auth` is a table of containers, not a value; grant one \
+         container at a time with `azure-options.{endpoint}.auth.<container>`, as Azure assigns \
+         access per container and there is no host-wide grant to set",
+        endpoint = toml_edit::Key::new(.endpoint.to_string()).display_repr()
     )]
-    AzureEndpointWideGrant { endpoint: String },
+    AzureEndpointWideGrant { endpoint: AzureEndpointKey },
+    #[error("invalid key `{key}`")]
+    InvalidKey {
+        key: String,
+        #[source]
+        source: Box<toml_edit::TomlError>,
+    },
+    #[error("`{key}` names no configuration entry")]
+    EmptyKey { key: String },
+    #[error("`{key}` names an s3 bucket with an empty name")]
+    EmptyS3Bucket { key: String },
+    #[error(
+        "s3 bucket `{bucket}` is not defined in this file; set `s3-options.{repr}` to its full \
+         JSON first",
+        repr = toml_edit::Key::new(.bucket.as_str())
+    )]
+    UndefinedS3Bucket { bucket: String },
+    #[error(
+        "`{key}` would define a new s3 bucket `{bucket}`, but `{existing}` is already a bucket; \
+         to define `{bucket}` anyway, write its name as one quoted segment: `s3-options.{repr}`",
+        repr = toml_edit::Key::new(.bucket.as_str())
+    )]
+    S3BucketExtendsBucket {
+        key: String,
+        bucket: String,
+        existing: String,
+    },
+    #[error(
+        "`{key}` would define a new s3 bucket `{bucket}`, but its last label reads like the field \
+         `{field}`; to define `{bucket}` anyway, write its name as one quoted segment: \
+         `s3-options.{repr}`",
+        repr = toml_edit::Key::new(.bucket.as_str())
+    )]
+    S3BucketEndsInField {
+        key: String,
+        bucket: String,
+        field: &'static str,
+    },
     #[error(transparent)]
     Path(#[from] ConfigPathError),
     #[error("{0}")]
@@ -1936,6 +1927,25 @@ impl SetConfigError {
             source,
         }
     }
+}
+
+fn set_s3_field(
+    options: &mut S3Options,
+    field: S3Field,
+    key: &str,
+    value: String,
+) -> Result<(), SetConfigError> {
+    match field {
+        S3Field::EndpointUrl => {
+            options.endpoint_url = Url::parse(&value).map_err(invalid_value(key))?;
+        }
+        S3Field::Region => options.region = value,
+        S3Field::AddressingStyle => {
+            options.addressing_style = S3AddressingStyle::deserialize(value.into_deserializer())
+                .map_err(invalid_value::<serde::de::value::Error>(key))?;
+        }
+    }
+    Ok(())
 }
 
 fn parse_opt<T: FromStr>(value: Option<String>, key: &str) -> Result<Option<T>, SetConfigError>
@@ -2652,12 +2662,29 @@ impl Config {
         Ok(result)
     }
 
-    /// Modify this config with the given key and value
+    /// Parses `key` and calls [`Config::set_key`].
+    pub fn set(&mut self, key: &str, value: Option<String>) -> Result<(), SetConfigError> {
+        self.set_key(&ConfigKey::parse(key)?, value)
+    }
+
+    /// Modify this config at the entry `key` addresses with the given value
     ///
     /// # Note
     ///
     /// It is required to call `save()` to persist the changes.
-    pub fn set(&mut self, key: &str, value: Option<String>) -> Result<(), SetConfigError> {
+    pub fn set_key(
+        &mut self,
+        key: &ConfigKey,
+        value: Option<String>,
+    ) -> Result<(), SetConfigError> {
+        match key.kind() {
+            ConfigKeyKind::Azure(azure) => self.set_azure_options(key.as_str(), azure, value),
+            ConfigKeyKind::S3(s3) => self.set_s3_options(key.as_str(), s3, value),
+            ConfigKeyKind::Other(_) => self.set_other(&key.canonical(), value),
+        }
+    }
+
+    fn set_other(&mut self, key: &str, value: Option<String>) -> Result<(), SetConfigError> {
         let supported_keys = self.get_keys().join(",\n\t");
         let err = SetConfigError::UnknownKey {
             key: key.to_string(),
@@ -2842,128 +2869,6 @@ impl Config {
                     }
                     _ => return Err(err),
                 }
-            }
-            key if key.starts_with("s3-options") => {
-                if key == "s3-options" {
-                    if let Some(value) = value {
-                        self.s3_options =
-                            serde_json::de::from_str(&value).map_err(invalid_value(key))?;
-                    } else {
-                        return Err(missing);
-                    }
-                    return Ok(());
-                }
-                let Some(subkey) = key.strip_prefix("s3-options.") else {
-                    return Err(err);
-                };
-                if let Some((bucket, rest)) = subkey.split_once('.') {
-                    if let Some(bucket_config) = self.s3_options.0.get_mut(bucket) {
-                        match rest {
-                            "endpoint-url" => {
-                                if let Some(value) = value {
-                                    bucket_config.endpoint_url =
-                                        Url::parse(&value).map_err(invalid_value(key))?;
-                                } else {
-                                    return Err(missing);
-                                }
-                            }
-                            "region" => {
-                                if let Some(value) = value {
-                                    bucket_config.region = value;
-                                } else {
-                                    return Err(missing);
-                                }
-                            }
-                            "addressing-style" => {
-                                if let Some(value) = value {
-                                    bucket_config.addressing_style =
-                                        S3AddressingStyle::deserialize(value.into_deserializer())
-                                            .map_err(invalid_value::<serde::de::value::Error>(
-                                                key,
-                                            ))?;
-                                } else {
-                                    return Err(missing);
-                                }
-                            }
-                            _ => return Err(err),
-                        }
-                    }
-                } else {
-                    let value = value.ok_or(missing)?;
-                    let s3_options: S3Options =
-                        serde_json::de::from_str(&value).map_err(invalid_value(key))?;
-                    self.s3_options.0.insert(subkey.to_string(), s3_options);
-                }
-            }
-            key if key.starts_with("azure-options") => {
-                if key == "azure-options" {
-                    self.azure_options = match value {
-                        Some(value) => {
-                            serde_json::de::from_str(&value).map_err(invalid_value(key))?
-                        }
-                        // Unsetting the whole table revokes every grant, which is
-                        // the safe direction: absent means anonymous.
-                        None => AzureOptionsMap::default(),
-                    };
-                    return Ok(());
-                }
-                let Some(subkey) = key.strip_prefix("azure-options.") else {
-                    return Err(err);
-                };
-
-                let (endpoint, field) = AzureConfigField::split(subkey)?;
-                let endpoint = AzureEndpointKey::parse(endpoint.trim_matches('"'))
-                    .map_err(invalid_value(key))?;
-
-                let Some(field) = field else {
-                    match value {
-                        Some(value) => {
-                            let options =
-                                serde_json::de::from_str(&value).map_err(invalid_value(key))?;
-                            self.azure_options.insert(endpoint, options);
-                        }
-                        None => {
-                            self.azure_options.remove(&endpoint);
-                        }
-                    }
-                    return Ok(());
-                };
-
-                // Read-modify-write rather than a mutable borrow: rebuilding the
-                // entry through `AzureEndpointOptions::new` keeps the type the only
-                // thing that can assemble one. An absent endpoint reads as the
-                // defaults, so setting one field on an endpoint with no entry writes
-                // an entry rather than silently doing nothing.
-                let current = self.azure_options.get(&endpoint);
-                let mut scheme = current.scheme();
-                let mut auth: IndexMap<ContainerName, Auth> = current
-                    .grants()
-                    .map(|(container, auth)| (container.clone(), auth))
-                    .collect();
-                match (field, value) {
-                    // Unsetting a grant drops the container from the table rather
-                    // than writing an explicit `false`: this file stops saying
-                    // anything about the container at all, which is what unsetting
-                    // means. Either way the container ends up anonymous here, so an
-                    // unset can never widen a grant.
-                    (AzureConfigField::Auth(container), None) => {
-                        auth.shift_remove(&container);
-                    }
-                    (AzureConfigField::Auth(container), Some(value)) => {
-                        auth.insert(
-                            container,
-                            value.parse::<bool>().map_err(invalid_value(key))?.into(),
-                        );
-                    }
-                    // Unsetting the scheme restores https, the conservative choice.
-                    (AzureConfigField::Scheme, None) => scheme = AzureScheme::default(),
-                    (AzureConfigField::Scheme, Some(value)) => {
-                        scheme = AzureScheme::deserialize(value.into_deserializer())
-                            .map_err(invalid_value::<serde::de::value::Error>(key))?;
-                    }
-                }
-                self.azure_options
-                    .insert(endpoint, AzureEndpointOptions::new(auth, scheme));
             }
             key if key.starts_with(VIRTUAL_PACKAGE_DETECTORS) => {
                 self.set_virtual_package_detectors(key, value)?;
@@ -3157,6 +3062,152 @@ impl Config {
             _ => return Err(err),
         }
 
+        Ok(())
+    }
+
+    fn set_s3_options(
+        &mut self,
+        key: &str,
+        s3: &S3Key,
+        value: Option<String>,
+    ) -> Result<(), SetConfigError> {
+        let value = value.ok_or_else(|| SetConfigError::MissingValue {
+            key: key.to_string(),
+        })?;
+        match s3 {
+            S3Key::Table => {
+                self.s3_options = serde_json::de::from_str(&value).map_err(invalid_value(key))?;
+            }
+            S3Key::Bucket { bucket, spelling } => {
+                self.ensure_unambiguous_bucket(key, bucket, *spelling)?;
+                let options = serde_json::de::from_str(&value).map_err(invalid_value(key))?;
+                self.s3_options.0.insert(bucket.to_string(), options);
+            }
+            S3Key::Field { bucket, field } => {
+                let options = self.s3_options.0.get_mut(bucket.as_str()).ok_or_else(|| {
+                    SetConfigError::UndefinedS3Bucket {
+                        bucket: bucket.to_string(),
+                    }
+                })?;
+                set_s3_field(options, *field, key, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuses a bucket whose dotted name could be a field of another bucket
+    /// written with a mistake.
+    fn ensure_unambiguous_bucket(
+        &self,
+        key: &str,
+        bucket: &S3Bucket,
+        spelling: BucketSpelling,
+    ) -> Result<(), SetConfigError> {
+        if spelling == BucketSpelling::Segment {
+            return Ok(());
+        }
+        if let Some(existing) = bucket
+            .dotted_prefixes()
+            .find(|prefix| self.s3_options.0.contains_key(*prefix))
+        {
+            return Err(SetConfigError::S3BucketExtendsBucket {
+                key: key.to_string(),
+                bucket: bucket.to_string(),
+                existing: existing.to_string(),
+            });
+        }
+        if let Some(field) = bucket.field_in_last_label() {
+            return Err(SetConfigError::S3BucketEndsInField {
+                key: key.to_string(),
+                bucket: bucket.to_string(),
+                field: field.as_str(),
+            });
+        }
+        Ok(())
+    }
+
+    fn set_azure_options(
+        &mut self,
+        key: &str,
+        azure: &AzureKey,
+        value: Option<String>,
+    ) -> Result<(), SetConfigError> {
+        match (azure, value) {
+            (AzureKey::Table, Some(value)) => {
+                self.azure_options =
+                    serde_json::de::from_str(&value).map_err(invalid_value(key))?;
+            }
+            // Unsetting the whole table revokes every grant, which is the safe
+            // direction: absent means anonymous.
+            (AzureKey::Table, None) => self.azure_options = AzureOptionsMap::default(),
+            (AzureKey::Endpoint(endpoint), Some(value)) => {
+                let options = serde_json::de::from_str(&value).map_err(invalid_value(key))?;
+                self.azure_options
+                    .insert(endpoint.settable(key)?.clone(), options);
+            }
+            (AzureKey::Endpoint(endpoint), None) => {
+                self.azure_options.remove(endpoint.settable(key)?);
+            }
+            (AzureKey::AuthTable(endpoint), Some(_)) => {
+                return Err(SetConfigError::AzureEndpointWideGrant {
+                    endpoint: endpoint.settable(key)?.clone(),
+                });
+            }
+            (AzureKey::AuthTable(endpoint), None) => {
+                self.revoke_azure_grants(endpoint.settable(key)?);
+            }
+            (AzureKey::Field { endpoint, field }, value) => {
+                self.set_azure_field(key, endpoint.settable(key)?, field, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn revoke_azure_grants(&mut self, endpoint: &AzureEndpointKey) {
+        let scheme = self.azure_options.get(endpoint).scheme();
+        self.azure_options.insert(
+            endpoint.clone(),
+            AzureEndpointOptions::new(IndexMap::new(), scheme),
+        );
+    }
+
+    /// Sets one field of `endpoint`'s entry, creating the entry from defaults if absent.
+    fn set_azure_field(
+        &mut self,
+        key: &str,
+        endpoint: &AzureEndpointKey,
+        field: &AzureField,
+        value: Option<String>,
+    ) -> Result<(), SetConfigError> {
+        let current = self.azure_options.get(endpoint);
+        let mut scheme = current.scheme();
+        let mut auth: IndexMap<ContainerName, Auth> = current
+            .grants()
+            .map(|(container, auth)| (container.clone(), auth))
+            .collect();
+        match (field, value) {
+            // Unsetting a grant drops the container from the table rather than
+            // writing an explicit `false`: this file stops saying anything about
+            // the container at all, which is what unsetting means. Either way the
+            // container ends up anonymous here, so an unset can never widen a grant.
+            (AzureField::Auth(container), None) => {
+                auth.shift_remove(container.settable(key)?);
+            }
+            (AzureField::Auth(container), Some(value)) => {
+                auth.insert(
+                    container.settable(key)?.clone(),
+                    value.parse::<bool>().map_err(invalid_value(key))?.into(),
+                );
+            }
+            // Unsetting the scheme restores https, the conservative choice.
+            (AzureField::Scheme, None) => scheme = AzureScheme::default(),
+            (AzureField::Scheme, Some(value)) => {
+                scheme = AzureScheme::deserialize(value.into_deserializer())
+                    .map_err(invalid_value::<serde::de::value::Error>(key))?;
+            }
+        }
+        self.azure_options
+            .insert(endpoint.clone(), AzureEndpointOptions::new(auth, scheme));
         Ok(())
     }
 
@@ -4890,7 +4941,12 @@ UNUSED = "unused"
             .unwrap();
         assert_eq!(config.proxy_config.non_proxy_hosts.len(), 2);
 
-        // Test s3-options with individual keys
+        config
+            .set(
+                "s3-options.test-bucket",
+                Some(r#"{"endpoint-url": "http://localhost:8000", "region": "auto"}"#.to_string()),
+            )
+            .unwrap();
         config
             .set(
                 "s3-options.test-bucket.endpoint-url",
@@ -5118,6 +5174,170 @@ UNUSED = "unused"
                 Some("true".to_string()),
             )
             .unwrap_err();
+    }
+
+    #[test]
+    fn test_set_azure_options_with_quoted_endpoint() {
+        let host = AzureEndpointKey::parse("mycompany.blob.core.windows.net").unwrap();
+        let releases = ContainerName::new("releases").unwrap();
+        let mut config = Config::default();
+
+        config
+            .set(
+                "azure-options.\"mycompany.blob.core.windows.net\".auth.releases",
+                Some("true".to_string()),
+            )
+            .unwrap();
+        config
+            .set(
+                "azure-options.\"mycompany.blob.core.windows.net\".scheme",
+                Some("http".to_string()),
+            )
+            .unwrap();
+
+        let entry = config.azure_options.get(&host);
+        assert!(entry.fetch(Some(&releases)).auth.is_granted());
+        assert_eq!(entry.scheme(), AzureScheme::Http);
+        assert_eq!(
+            config.azure_options.iter().map(|(k, _)| k).collect_vec(),
+            vec![&host]
+        );
+    }
+
+    #[test]
+    fn test_set_s3_options_with_dotted_bucket() {
+        let options = r#"{"endpoint-url": "http://localhost:9000", "region": "auto", "addressing-style": "path"}"#;
+        for key in ["s3-options.my.bucket", "s3-options.\"my.bucket\""] {
+            let mut config = Config::default();
+            config.set(key, Some(options.to_string())).unwrap();
+            config
+                .set("s3-options.my.bucket.region", Some("eu-west-1".to_string()))
+                .unwrap();
+            assert_eq!(config.s3_options.0.keys().collect_vec(), ["my.bucket"]);
+            assert_eq!(config.s3_options.0["my.bucket"].region, "eu-west-1");
+        }
+    }
+
+    #[test]
+    fn test_set_s3_field_on_undefined_bucket_fails() {
+        let mut config = Config::default();
+        let err = config
+            .set("s3-options.missing.region", Some("eu-west-1".to_string()))
+            .unwrap_err();
+        insta::assert_snapshot!(
+            err,
+            @"s3 bucket `missing` is not defined in this file; set `s3-options.missing` to its full JSON first"
+        );
+        assert!(config.s3_options.is_empty());
+    }
+
+    #[test]
+    fn test_set_s3_bucket_named_like_a_field() {
+        let options = r#"{"endpoint-url": "http://localhost:9000", "region": "auto"}"#;
+        for key in ["s3-options.region", "s3-options.\"region\""] {
+            let mut config = Config::default();
+            config.set(key, Some(options.to_string())).unwrap();
+            assert_eq!(config.s3_options.0.keys().collect_vec(), ["region"]);
+        }
+    }
+
+    #[test]
+    fn test_set_ambiguous_dotted_s3_bucket_fails() {
+        let options = r#"{"endpoint-url": "http://localhost:9000", "region": "auto"}"#;
+        let mut config = Config::default();
+        config
+            .set("s3-options.\"my.bucket\"", Some(options.to_string()))
+            .unwrap();
+
+        insta::assert_snapshot!(
+            config
+                .set("s3-options.my.bucket.endpoint_url", Some(options.to_string()))
+                .unwrap_err(),
+            @r#"`s3-options.my.bucket.endpoint_url` would define a new s3 bucket `my.bucket.endpoint_url`, but `my.bucket` is already a bucket; to define `my.bucket.endpoint_url` anyway, write its name as one quoted segment: `s3-options."my.bucket.endpoint_url"`"#
+        );
+        insta::assert_snapshot!(
+            config
+                .set("s3-options.other.Region", Some(options.to_string()))
+                .unwrap_err(),
+            @r#"`s3-options.other.Region` would define a new s3 bucket `other.Region`, but its last label reads like the field `region`; to define `other.Region` anyway, write its name as one quoted segment: `s3-options."other.Region"`"#
+        );
+        config
+            .set(
+                "s3-options.\"my.bucket.endpoint_url\"",
+                Some(options.to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            config.s3_options.0.keys().collect_vec(),
+            ["my.bucket", "my.bucket.endpoint_url"]
+        );
+    }
+
+    #[test]
+    fn test_set_azure_key_errors() {
+        let mut config = Config::default();
+        insta::assert_snapshot!(
+            config
+                .set(
+                    "azure-options.mycompany.blob.core.windows.net.auth",
+                    Some("true".to_string()),
+                )
+                .unwrap_err(),
+            @r#"`azure-options."mycompany.blob.core.windows.net".auth` is a table of containers, not a value; grant one container at a time with `azure-options."mycompany.blob.core.windows.net".auth.<container>`, as Azure assigns access per container and there is no host-wide grant to set"#
+        );
+        insta::assert_snapshot!(
+            config
+                .set("azure-options.auth", Some("true".to_string()))
+                .unwrap_err(),
+            @"invalid value for `azure-options.auth`"
+        );
+        insta::assert_snapshot!(
+            config
+                .set("azure-options.scheme", Some("http".to_string()))
+                .unwrap_err(),
+            @"invalid value for `azure-options.scheme`"
+        );
+    }
+
+    #[test]
+    fn test_set_azure_containers_named_like_fields() {
+        let host = AzureEndpointKey::parse("mycompany.blob.core.windows.net").unwrap();
+        let mut config = Config::default();
+        for container in ["scheme", "auth"] {
+            config
+                .set(
+                    &format!("azure-options.mycompany.blob.core.windows.net.auth.{container}"),
+                    Some("true".to_string()),
+                )
+                .unwrap();
+        }
+        let entry = config.azure_options.get(&host);
+        assert_eq!(entry.scheme(), AzureScheme::Https);
+        assert_eq!(
+            entry
+                .grants()
+                .map(|(container, _)| container.to_string())
+                .collect_vec(),
+            ["scheme", "auth"]
+        );
+    }
+
+    #[test]
+    fn test_unset_azure_auth_table_revokes_every_grant() {
+        let host = AzureEndpointKey::parse("mycompany.blob.core.windows.net").unwrap();
+        let mut config = Config::default();
+        config
+            .set(
+                "azure-options.mycompany.blob.core.windows.net",
+                Some(r#"{"auth": {"releases": true}, "scheme": "http"}"#.to_string()),
+            )
+            .unwrap();
+        config
+            .set("azure-options.mycompany.blob.core.windows.net.auth", None)
+            .unwrap();
+        let entry = config.azure_options.get(&host);
+        assert_eq!(entry.grants().count(), 0);
+        assert_eq!(entry.scheme(), AzureScheme::Http);
     }
 
     /// A grant in a project's `.pixi/config.toml` must not take effect: it would
