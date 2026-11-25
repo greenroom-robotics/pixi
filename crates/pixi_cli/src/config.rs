@@ -1,8 +1,11 @@
 use crate::cli_config::WorkspaceConfig;
 use clap::Parser;
+use itertools::Itertools;
 use miette::{IntoDiagnostic, WrapErr};
 use pixi_config;
-use pixi_config::{Config, ConfigError, GlobalConfigSource};
+use pixi_config::{
+    AzureEndpointKey, Config, ConfigError, ConfigKey, ConfigPath, GlobalConfigSource, KeySegment,
+};
 use pixi_consts::consts;
 use pixi_core::WorkspaceLocator;
 use pixi_core::workspace::WorkspaceLocatorError;
@@ -12,11 +15,16 @@ use rattler_conda_types::{ChannelUrl, NamedChannelOrUrl};
 use serde_json::Value as JsonValue;
 use std::{
     io::Write,
-    iter::once,
     path::{Path, PathBuf},
     str::FromStr,
 };
-use toml_edit::{DocumentMut, Item, Key};
+use toml_edit::{Array, DocumentMut, Item};
+
+const DEFAULT_CHANNELS: &str = "default-channels";
+const EXTRA_INDEX_URLS: &str = "pypi-config.extra-index-urls";
+const EXCLUDE_NEWER: &str = "exclude-newer";
+const VIRTUAL_PACKAGE_DETECTORS: &str = "virtual-package-detectors";
+const CONSENT: &str = "consent";
 
 #[derive(Parser, Debug)]
 enum Subcommand {
@@ -150,55 +158,6 @@ enum AlterMode {
 pub struct Args {
     #[clap(subcommand)]
     subcommand: Subcommand,
-}
-
-#[derive(Debug)]
-pub struct KeyPath {
-    parent_keys: Vec<String>,
-    target_key: String,
-}
-
-impl KeyPath {
-    pub fn parse(key: &str) -> miette::Result<Self> {
-        let mut parts = Key::parse(key)
-            .into_diagnostic()
-            .wrap_err_with(|| format!("failed to parse the key '{key}'"))?;
-
-        if parts.is_empty() {
-            return Err(miette::miette!("Key path cannot be empty"));
-        }
-
-        let target_key = parts
-            .pop()
-            .ok_or_else(|| miette::miette!("Expected a target key"))?
-            .get()
-            .to_string();
-        let parent_keys = parts.into_iter().map(|k| k.get().to_string()).collect();
-
-        Ok(Self {
-            parent_keys,
-            target_key,
-        })
-    }
-
-    pub fn parents(&self) -> Vec<&str> {
-        self.parent_keys.iter().map(|s| s.as_str()).collect()
-    }
-
-    pub fn target(&self) -> &str {
-        &self.target_key
-    }
-
-    fn consent_origin(&self) -> Option<ChannelUrl> {
-        if self.parent_keys != ["virtual-package-detectors", "consent"] {
-            return None;
-        }
-        url::Url::parse(self.target())
-            .ok()
-            .filter(|url| !url.cannot_be_a_base())
-            .map(ChannelUrl::from)
-            .map(|origin| pixi_config::consent_origin(&origin))
-    }
 }
 
 pub async fn execute(args: Args) -> miette::Result<()> {
@@ -416,14 +375,6 @@ async fn determine_config_write_destination(
     Ok((pixi_config::user_config_write_path(), None))
 }
 
-#[derive(Debug, thiserror::Error, miette::Diagnostic)]
-enum ConfigEditError {
-    #[error(transparent)]
-    ParseKey(#[from] toml_edit::TomlError),
-    #[error(transparent)]
-    NotATable(#[from] pixi_toml_edit::NotATableError),
-}
-
 /// Alters a specific key in the user configuration file according to the given `mode`.
 ///
 /// Handles reading the existing TOML document (or initializing a new one),
@@ -432,6 +383,7 @@ enum ConfigEditError {
 ///
 /// # Errors
 ///
+/// - `key` is not a valid key.
 /// - The target config path cannot be determined or created.
 /// - The existing config file cannot be read or parsed as valid TOML.
 /// - A list-only operation (`Prepend`/`Append`) is attempted on a non-list key.
@@ -442,6 +394,7 @@ async fn alter_config(
     value: Option<String>,
     mode: AlterMode,
 ) -> miette::Result<()> {
+    let key = ConfigKey::parse(key)?;
     let (mut to, repository) = determine_config_write_destination(common_args).await?;
     let content = match fs_err::read_to_string(&to) {
         Ok(s) => s,
@@ -476,130 +429,48 @@ async fn alter_config(
         Err(e) => return Err(e.into()),
     };
 
-    let repository_consent = if let Some(root) = &repository {
-        let segments = Key::parse(key).map_err(ConfigEditError::ParseKey)?;
-        let is_consent = segments
-            .first()
-            .is_some_and(|segment| segment.get() == "virtual-package-detectors")
-            && (segments.len() == 1
-                || segments
-                    .get(1)
-                    .is_some_and(|segment| segment.get() == "consent"));
-        if is_consent {
-            to = pixi_config::repository_detector_config_path(root)?;
-        }
-        is_consent
-    } else {
-        false
-    };
+    let repository_consent = repository.is_some() && edits_detector_consent(&key.path());
+    if repository_consent && let Some(root) = &repository {
+        to = pixi_config::repository_detector_config_path(root)?;
+    }
     match mode {
-        AlterMode::Prepend | AlterMode::Append => {
-            let is_prepend = matches!(mode, AlterMode::Prepend);
+        AlterMode::Prepend => {
             let input = value.expect("value must be provided");
-
-            match key {
-                // `default-channels` replaces the lower layers rather than concatenating them.
-                // If the local file has no override yet, we must write the entire merged list
-                // so lower layers aren't accidentally silenced. If a local list already exists,
-                // we append/prepend to it directly.
-                "default-channels" => {
-                    let channel = NamedChannelOrUrl::from_str(&input)
-                        .into_diagnostic()
-                        .context("invalid channel name")?;
-
-                    let local_has_channels = toml_doc
-                        .as_item()
-                        .get("default-channels")
-                        .or_else(|| toml_doc.as_item().get("default_channels"))
-                        .is_some();
-
-                    if local_has_channels {
-                        // Local file already has default-channels. Modify the local list and use mode (Prepend/Append)
-                        // to preserve existing multi-line TOML formatting.
-                        if is_prepend {
-                            config.default_channels.insert(0, channel);
-                        } else {
-                            config.default_channels.push(channel)
-                        }
-                        transplant_config_key(
-                            &config,
-                            &mut toml_doc,
-                            key,
-                            &mode,
-                            common_args.shared,
-                        )?;
-                    } else {
-                        // Local file is missing default-channels. Load inherited global layers,
-                        // add the channel, and user AlterMode::Set to write the full merged array.
-                        let mut new_channels =
-                            load_config(common_args, &GlobalConfigSource::Search)
-                                .await?
-                                .default_channels;
-                        if is_prepend {
-                            new_channels.insert(0, channel);
-                        } else {
-                            new_channels.push(channel)
-                        }
-                        config.default_channels = new_channels;
-                        transplant_config_key(
-                            &config,
-                            &mut toml_doc,
-                            key,
-                            &AlterMode::Set,
-                            common_args.shared,
-                        )?;
-                    }
-                }
-                // `extra-index-urls` is concatenated across layers, so only
-                // this file's own share of the list is edited; copying the
-                // lower layers in would list them twice. A prepend therefore
-                // lands ahead of this file's URLs, but after the lower ones.
-                "pypi-config.extra-index-urls" => {
-                    let url = url::Url::parse(&input)
-                        .map_err(|e| miette::miette!("Invalid URL: {}", e))?;
-                    if is_prepend {
-                        config.pypi_config.extra_index_urls.insert(0, url);
-                    } else {
-                        config.pypi_config.extra_index_urls.push(url);
-                    }
-                    transplant_config_key(&config, &mut toml_doc, key, &mode, common_args.shared)?;
-                }
-                _ => {
-                    let list_keys = ["default-channels", "pypi-config.extra-index-urls"];
-                    let msg_cmd = if is_prepend { "prepend" } else { "append" };
-                    return Err(miette::miette!(
-                        "{} is only supported for list keys: {}",
-                        msg_cmd,
-                        list_keys.join(", ")
-                    ));
-                }
-            }
+            pend_config_key(
+                common_args,
+                &mut config,
+                &mut toml_doc,
+                &key,
+                &input,
+                ListEdit::Prepend,
+            )
+            .await?
         }
-        // A key inside `exclude-newer` is edited and validated by
-        // `rattler_config`, which matches exemptions by their normalized
-        // package name, and only the edited key is written into the
-        // document, keeping the comments and layout around it.
+        AlterMode::Append => {
+            let input = value.expect("value must be provided");
+            pend_config_key(
+                common_args,
+                &mut config,
+                &mut toml_doc,
+                &key,
+                &input,
+                ListEdit::Append,
+            )
+            .await?
+        }
         // An invalid file is not loaded, so the edit can't be validated and
         // the key is removed from the document like any other key.
-        AlterMode::Set | AlterMode::Unset if loaded && key.starts_with("exclude-newer.") => {
-            let changed = rattler_config::edit::set_exclude_newer_in_document(
-                toml_doc.as_table_mut(),
-                &mut config.exclude_newer,
-                key,
-                value,
-            )
-            .map_err(|error| pixi_config::SetConfigError::from_exclude_newer_edit(key, error))?;
-            if matches!(mode, AlterMode::Unset) && !changed {
-                miette::bail!("Key '{}' not found in configuration file", key);
-            }
+        AlterMode::Set | AlterMode::Unset if loaded && edits_exclude_newer_entry(&key.path()) => {
+            edit_exclude_newer(&mut config, &mut toml_doc, &key, value, &mode)?
         }
-        AlterMode::Set => {
-            // Run set on Config object for validation
-            config.set(key, value)?;
-
-            transplant_config_key(&config, &mut toml_doc, key, &mode, common_args.shared)?;
-        }
-        AlterMode::Unset => unset(&mut toml_doc, key, common_args.shared)?,
+        AlterMode::Set => set_config_key(
+            &mut config,
+            &mut toml_doc,
+            &key,
+            SetValue::from(value),
+            common_args.shared,
+        )?,
+        AlterMode::Unset => unset(&mut toml_doc, &key, common_args.shared)?,
     }
 
     let contents = toml_doc.to_string();
@@ -610,9 +481,6 @@ async fn alter_config(
             "failed to create directories in '{}'",
             parent.display()
         ))?;
-    if repository_consent && let Some(root) = &repository {
-        to = pixi_config::repository_detector_config_path(root)?;
-    }
     fs_err::write(&to, contents)
         .into_diagnostic()
         .wrap_err(format!("failed to write config to '{}'", to.display()))?;
@@ -621,47 +489,301 @@ async fn alter_config(
     Ok(())
 }
 
+/// Whether `path` addresses the detector consent, which a repository keeps
+/// in a file of its own.
+fn edits_detector_consent(path: &ConfigPath) -> bool {
+    let mut names = path.segments().map(KeySegment::as_name);
+    names.next() == Some(Some(VIRTUAL_PACKAGE_DETECTORS))
+        && matches!(names.next(), None | Some(Some(CONSENT)))
+}
+
+fn edits_exclude_newer_entry(path: &ConfigPath) -> bool {
+    path.parents()
+        .first()
+        .is_some_and(|root| root.as_name() == Some(EXCLUDE_NEWER))
+}
+
+/// Edits a key inside `exclude-newer` through `rattler_config`, which matches
+/// exemptions by their normalized package name and keeps the comments and
+/// layout around the edited key.
+///
+/// # Errors
+///
+/// - `value` is not valid for `key`.
+/// - `mode` is `Unset` and the document does not hold `key`.
+fn edit_exclude_newer(
+    config: &mut Config,
+    toml_doc: &mut TomlDocument,
+    key: &ConfigKey,
+    value: Option<String>,
+    mode: &AlterMode,
+) -> miette::Result<()> {
+    let canonical = key.canonical();
+    let changed = rattler_config::edit::set_exclude_newer_in_document(
+        toml_doc.as_table_mut(),
+        &mut config.exclude_newer,
+        &canonical,
+        value,
+    )
+    .map_err(|error| pixi_config::SetConfigError::from_exclude_newer_edit(&canonical, error))?;
+    if matches!(mode, AlterMode::Unset) && !changed {
+        miette::bail!("key `{key}` not found in configuration file");
+    }
+    Ok(())
+}
+
+/// Which end of a list a value is added to.
+#[derive(Debug, Clone, Copy)]
+enum ListEdit {
+    Prepend,
+    Append,
+}
+
+impl ListEdit {
+    fn insert<T>(self, list: &mut Vec<T>, item: T) {
+        match self {
+            Self::Prepend => list.insert(0, item),
+            Self::Append => list.push(item),
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::Prepend => "prepend",
+            Self::Append => "append",
+        }
+    }
+}
+
+const LIST_KEYS: [&str; 2] = [DEFAULT_CHANNELS, EXTRA_INDEX_URLS];
+
+/// Adds `input` to the list `key` addresses, in `config` and in the document.
+///
+/// # Errors
+///
+/// - `key` is not a list key, or `input` is not valid for it.
+/// - Writing the list into the document fails.
+async fn pend_config_key(
+    common_args: &CommonArgs,
+    config: &mut Config,
+    toml_doc: &mut TomlDocument,
+    key: &ConfigKey,
+    input: &str,
+    edit: ListEdit,
+) -> miette::Result<()> {
+    let transplant = match key.canonical().as_str() {
+        DEFAULT_CHANNELS => {
+            pend_default_channel(common_args, config, toml_doc, key, input, edit).await?
+        }
+        EXTRA_INDEX_URLS => {
+            pend_extra_index_url(config, toml_doc, key, input, edit, common_args.shared)?
+        }
+        _ => miette::bail!(
+            "{} is only supported for list keys: {}",
+            edit.command(),
+            LIST_KEYS.join(", ")
+        ),
+    };
+    ensure_written(key, transplant)
+}
+
+/// `default-channels` replaces the lower layers rather than concatenating
+/// them, so a file without its own list starts from the merged one; otherwise
+/// lower layers would be silenced.
+async fn pend_default_channel(
+    common_args: &CommonArgs,
+    config: &mut Config,
+    toml_doc: &mut TomlDocument,
+    key: &ConfigKey,
+    input: &str,
+    edit: ListEdit,
+) -> miette::Result<Transplant> {
+    let channel = NamedChannelOrUrl::from_str(input)
+        .into_diagnostic()
+        .context("invalid channel name")?;
+    if !spellings_in(toml_doc.as_item(), key.path().target()).is_empty() {
+        edit.insert(&mut config.default_channels, channel);
+        return transplant_config_key(
+            config,
+            toml_doc,
+            key,
+            TransplantMode::List(edit),
+            common_args.shared,
+        );
+    }
+    let mut channels = load_config(common_args, &GlobalConfigSource::Search)
+        .await?
+        .default_channels;
+    edit.insert(&mut channels, channel);
+    config.default_channels = channels;
+    transplant_config_key(
+        config,
+        toml_doc,
+        key,
+        TransplantMode::Replace,
+        common_args.shared,
+    )
+}
+
+/// `extra-index-urls` is concatenated across layers, so only this file's own
+/// share of the list is edited, and a prepend lands after the lower layers.
+fn pend_extra_index_url(
+    config: &mut Config,
+    toml_doc: &mut TomlDocument,
+    key: &ConfigKey,
+    input: &str,
+    edit: ListEdit,
+    shared: bool,
+) -> miette::Result<Transplant> {
+    let url = url::Url::parse(input).map_err(|e| miette::miette!("invalid URL: {}", e))?;
+    edit.insert(&mut config.pypi_config.extra_index_urls, url);
+    transplant_config_key(config, toml_doc, key, TransplantMode::List(edit), shared)
+}
+
+fn ensure_written(key: &ConfigKey, transplant: Transplant) -> miette::Result<()> {
+    match transplant {
+        Transplant::Written => Ok(()),
+        Transplant::Omitted(_) => miette::bail!("nothing was written for `{key}`"),
+    }
+}
+
+/// Whether an edit removed an entry from the document.
+enum Removal {
+    Removed,
+    Absent,
+}
+
+/// What writing a key from a validated `Config` did to the document.
+#[must_use]
+enum Transplant {
+    Written,
+    /// The configuration does not serialize the key, so any entry is removed.
+    Omitted(Removal),
+}
+
+/// How a transplanted entry is written into the document.
+#[derive(Debug, Clone, Copy)]
+enum TransplantMode {
+    Replace,
+    /// Adds the list's first or last element to the document's list.
+    List(ListEdit),
+}
+
+/// The value `pixi config set` was given for a key.
+enum SetValue {
+    Value(String),
+    Clear,
+}
+
+impl From<Option<String>> for SetValue {
+    fn from(value: Option<String>) -> Self {
+        value.map_or(Self::Clear, Self::Value)
+    }
+}
+
+impl SetValue {
+    fn to_option(&self) -> Option<String> {
+        match self {
+            Self::Value(value) => Some(value.clone()),
+            Self::Clear => None,
+        }
+    }
+}
+
+/// Sets `key` to `value` in `config` and writes the entry it addresses into
+/// the document.
+///
+/// # Errors
+///
+/// - `value` is not valid for `key`.
+/// - Writing the entry into the document fails.
+/// - `value` is not the default for `key`, yet the configuration does not
+///   store it.
+fn set_config_key(
+    config: &mut Config,
+    toml_doc: &mut TomlDocument,
+    key: &ConfigKey,
+    value: SetValue,
+    shared: bool,
+) -> miette::Result<()> {
+    config.set_key(key, value.to_option())?;
+    let transplant = transplant_config_key(config, toml_doc, key, TransplantMode::Replace, shared)?;
+    match unstored_value(&value, &transplant) {
+        Some(value) => ensure_default(key, value),
+        None => Ok(()),
+    }
+}
+
+/// The value of a set that left the document without an entry for its key.
+fn unstored_value<'a>(value: &'a SetValue, transplant: &Transplant) -> Option<&'a str> {
+    match (value, transplant) {
+        (SetValue::Value(value), Transplant::Omitted(Removal::Absent)) => Some(value),
+        _ => None,
+    }
+}
+
+/// Succeeds when `value` is the default for `key`, which the configuration
+/// does not store.
+fn ensure_default(key: &ConfigKey, value: &str) -> miette::Result<()> {
+    let mut default = Config::default();
+    default.set_key(key, Some(value.to_string()))?;
+    if find_entry(serialize(&default)?.as_item(), &key.path()).is_some() {
+        miette::bail!(
+            "nothing was written for `{key}`, as the configuration does not store `{value}` \
+             there; edit the file with `pixi config edit` instead"
+        );
+    }
+    Ok(())
+}
+
 /// Unset a key from the TOML document, preserving existing formatting and comments.
 ///
 /// # Errors
 ///
-/// - `key` is not a valid key path.
 /// - The specified key does not exist in the document.
 /// - The unset operation leaves the config as invalid.
-fn unset(toml_doc: &mut TomlDocument, key: &str, shared: bool) -> miette::Result<()> {
-    let key_path = KeyPath::parse(key)?;
+fn unset(toml_doc: &mut TomlDocument, key: &ConfigKey, shared: bool) -> miette::Result<()> {
+    match remove_key(toml_doc, key, shared)? {
+        Removal::Removed => Ok(()),
+        Removal::Absent => miette::bail!("key `{key}` not found in configuration file"),
+    }
+}
 
-    let top_level_table = key_path.parents().is_empty();
-
-    let parent_table = if top_level_table {
-        toml_doc.as_item_mut()
-    } else {
-        let parents_keys = resolve_parent_keys(toml_doc, &key_path.parents());
-        let parents_strs: Vec<&str> = parents_keys.iter().map(|s| s.as_str()).collect();
-        toml_doc
-            .get_or_insert_nested_item(&parents_strs)
-            .into_diagnostic()?
-    };
-
-    let spellings = matching_target_keys(parent_table, &key_path);
+/// Removes every spelling of the entry `key` addresses from the document,
+/// along with the parent tables that leaves empty.
+///
+/// # Errors
+///
+/// - Navigating the document's tables fails.
+/// - The removal leaves the config as invalid.
+fn remove_key(
+    toml_doc: &mut TomlDocument,
+    key: &ConfigKey,
+    shared: bool,
+) -> miette::Result<Removal> {
+    let path = key.path();
+    let parents = resolve_parent_keys(toml_doc, path.parents());
+    let parent_table = nested_item_mut(toml_doc, &parents)?;
+    let spellings = spellings_in(parent_table, path.target());
+    for spelling in &spellings {
+        remove_entry(parent_table, spelling).into_diagnostic()?;
+    }
+    prune_empty_parents(toml_doc, as_strs(&parents))?;
     if spellings.is_empty() {
-        miette::bail!("Key '{}' not found in configuration file", key);
+        return Ok(Removal::Absent);
     }
-    for spelling in spellings {
-        remove_entry(parent_table, &spelling).into_diagnostic()?;
-    }
+    validate_document(toml_doc, shared)
+        .wrap_err_with(|| format!("unsetting `{key}` would leave the config file invalid"))?;
+    Ok(Removal::Removed)
+}
 
-    prune_empty_parents(toml_doc, key_path.parents())?;
-
+fn validate_document(toml_doc: &TomlDocument, shared: bool) -> miette::Result<()> {
     let contents = toml_doc.to_string();
-    let validation = if shared {
-        Config::keys_not_shared(&contents).map(|_| ())
+    if shared {
+        Config::keys_not_shared(&contents)?;
     } else {
-        Config::from_toml(&contents, None).map(|_| ())
-    };
-    validation
-        .wrap_err_with(|| format!("Unsetting the {key} would leave the config file invalid"))?;
-
+        Config::from_toml(&contents, None)?;
+    }
     Ok(())
 }
 
@@ -705,170 +827,202 @@ fn prune_empty_parents(toml_doc: &mut TomlDocument, mut path: Vec<&str>) -> miet
 ///
 /// # Errors
 ///
-/// - `key` is not a valid key path.
 /// - Serializing `config` or parsing the temporary TOML document fails.
+/// - The entry is not shared by all rattler-based tools while `shared` is set.
 /// - Navigating or creating nested parent tables in `toml_doc` fails.
+/// - Removing an omitted entry fails, as [`remove_key`] does.
 fn transplant_config_key(
     config: &Config,
     toml_doc: &mut TomlDocument,
-    key: &str,
-    mode: &AlterMode,
+    key: &ConfigKey,
+    mode: TransplantMode,
     shared: bool,
-) -> miette::Result<()> {
-    let key_path = KeyPath::parse(key)?;
-
-    let full_serialized = toml_edit::ser::to_string(&config).into_diagnostic()?;
-    let temp_doc = full_serialized.parse::<DocumentMut>().into_diagnostic()?;
-
-    // Walk down all the way to the leaf. The serialized document spells every
-    // segment the way the configuration does, which may differ from the key
-    // as the user typed it.
-    let mut current_item = temp_doc.as_item();
-    for parent in key_path.parents() {
-        current_item = get_any_spelling(current_item, parent).unwrap_or(&Item::None);
-    }
-    let consent_origin = key_path.consent_origin();
-    let serialized_target = consent_origin
-        .as_ref()
-        .map(ChannelUrl::as_str)
-        .unwrap_or_else(|| key_path.target());
-    current_item = get_any_spelling(current_item, serialized_target).unwrap_or(&Item::None);
-
-    if current_item.is_none() {
-        // fall back into unset
-        match unset(toml_doc, key, shared) {
-            Ok(()) => return Ok(()),
-            Err(e) if e.to_string().contains("not found in configuration file") => {
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    if shared {
-        // Validate the serialized section being edited, not unrelated foreign
-        // keys on disk. Keep required siblings, such as an S3 bucket's region.
-        let root = key_path
-            .parent_keys
-            .first()
-            .map(String::as_str)
-            .unwrap_or_else(|| key_path.target());
-        let mut selected = DocumentMut::new();
-        selected[root] = get_any_spelling(temp_doc.as_item(), root)
-            .expect("the serialized key has a root")
-            .clone();
-        let not_shared = Config::keys_not_shared(&selected.to_string())?;
-        if !not_shared.is_empty() {
-            return Err(miette::miette!(
-                "'{}' is not a key shared by all rattler-based tools, so it cannot be written to \
-                 the shared configuration. Use `--global` to set it for pixi alone.",
-                not_shared.join("', '")
-            ));
-        }
-    }
-
-    let target_table = if key_path.parents().is_empty() {
-        Ok(toml_doc.as_item_mut())
-    } else {
-        let parents_keys = resolve_parent_keys(toml_doc, &key_path.parents());
-        let parents_strs: Vec<&str> = parents_keys.iter().map(|s| s.as_str()).collect();
-        toml_doc
-            .get_or_insert_nested_item(&parents_strs)
-            .into_diagnostic()
-    }?;
-
-    if let AlterMode::Append | AlterMode::Prepend = mode
-        && let Some(new_value) = current_item.as_value()
-        && let Some(serialized_array) = new_value.as_array()
-    {
-        // Check which key name to modify
-        let array_key = legacy_alias(&key_path.target_key)
-            .filter(|alias| {
-                target_table
-                    .as_table_like()
-                    .is_some_and(|t| t.contains_key(alias))
-            })
-            .unwrap_or_else(|| key_path.target().to_string());
-
-        let target_array = toml_doc
-            .get_or_insert_toml_array_mut(&key_path.parents(), &array_key)
-            .into_diagnostic()?;
-
-        if matches!(mode, AlterMode::Prepend) {
-            if let Some(new_item) = serialized_array.get(0) {
-                insert_array_element(target_array, 0, new_item.clone());
-            }
-        } else if let Some(new_item) = serialized_array.iter().last() {
-            push_array_element(target_array, new_item.clone());
-        }
-        return Ok(());
-    }
-
-    // Replace legacy snake_case keys while preserving their comments.
-    if let Some(alias) = legacy_alias(&key_path.target_key) {
-        let _ = remove_entry(target_table, &alias).into_diagnostic()?;
-    }
-    let spellings = matching_target_keys(target_table, &key_path);
-    let target_key = if let Some(origin) = &consent_origin {
-        spellings
-            .iter()
-            .find(|key| {
-                url::Url::parse(key)
-                    .ok()
-                    .map(ChannelUrl::from)
-                    .is_some_and(|channel| channel == *origin)
-            })
-            .cloned()
-            .unwrap_or_else(|| origin.as_str().trim_end_matches('/').to_string())
-    } else {
-        spellings
-            .first()
-            .cloned()
-            .or_else(|| canonical_channel_url(key_path.target()))
-            .unwrap_or_else(|| key_path.target().to_string())
+) -> miette::Result<Transplant> {
+    let path = key.path();
+    let serialized = serialize(config)?;
+    let Some(entry) = find_entry(serialized.as_item(), &path) else {
+        return remove_key(toml_doc, key, shared).map(Transplant::Omitted);
     };
-    for spelling in spellings {
-        if spelling != target_key {
-            remove_entry(target_table, &spelling).map_err(ConfigEditError::NotATable)?;
+    if shared {
+        ensure_shared(&serialized, path.root())?;
+    }
+    let parents = resolve_parent_keys(toml_doc, path.parents());
+    match (mode, entry.as_value().and_then(|value| value.as_array())) {
+        (TransplantMode::List(edit), Some(list)) => {
+            edit_document_list(toml_doc, &parents, path.target(), edit, list)?
         }
+        _ => write_entry(toml_doc, &parents, path.target(), entry)?,
     }
+    Ok(Transplant::Written)
+}
 
-    if let Some(value) = current_item.as_value() {
-        upsert_entry(target_table, &target_key, value.clone()).into_diagnostic()?;
-    } else if let Some(table_to_insert) = current_item.as_table()
-        && let Some(table_like) = target_table.as_table_like_mut()
-    {
-        table_like.insert(&target_key, Item::Table(table_to_insert.clone()));
+fn serialize(config: &Config) -> miette::Result<DocumentMut> {
+    toml_edit::ser::to_string(config)
+        .into_diagnostic()?
+        .parse::<DocumentMut>()
+        .into_diagnostic()
+}
+
+/// The entry at `path` in `item`, under whichever spellings `item` uses.
+fn find_entry<'a>(item: &'a Item, path: &ConfigPath) -> Option<&'a Item> {
+    path.segments().try_fold(item, |item, segment| {
+        let spelling = spellings_in(item, segment).into_iter().next()?;
+        item.get(&spelling)
+    })
+}
+
+/// Validates the serialized section being edited, not unrelated foreign keys
+/// on disk, keeping required siblings such as an S3 bucket's region.
+fn ensure_shared(serialized: &DocumentMut, root: &KeySegment) -> miette::Result<()> {
+    let spelling = spellings_in(serialized.as_item(), root)
+        .into_iter()
+        .next()
+        .expect("the serialized key has a root");
+    let mut selected = DocumentMut::new();
+    selected[&spelling] = serialized[&spelling].clone();
+    let not_shared = Config::keys_not_shared(&selected.to_string())?;
+    if !not_shared.is_empty() {
+        return Err(miette::miette!(
+            "'{}' is not a key shared by all rattler-based tools, so it cannot be written to \
+             the shared configuration. Use `--global` to set it for pixi alone.",
+            not_shared.join("', '")
+        ));
     }
-
     Ok(())
 }
 
-fn matching_target_keys(item: &Item, key_path: &KeyPath) -> Vec<String> {
-    if let Some(origin) = key_path.consent_origin() {
-        return item
-            .as_table_like()
-            .into_iter()
-            .flat_map(|table| table.iter())
-            .filter_map(|(key, _)| {
-                url::Url::parse(key)
-                    .ok()
-                    .map(ChannelUrl::from)
-                    .filter(|channel| pixi_config::consent_origin(channel) == origin)
-                    .map(|_| key.to_string())
-            })
-            .collect();
-    }
-    key_spellings(key_path.target())
+/// Adds the first or last element of `list` to the document's list at
+/// `target`, keeping the formatting of the list already there.
+fn edit_document_list(
+    toml_doc: &mut TomlDocument,
+    parents: &[String],
+    target: &KeySegment,
+    edit: ListEdit,
+    list: &Array,
+) -> miette::Result<()> {
+    let list_key = spellings_in(nested_item_mut(toml_doc, parents)?, target)
         .into_iter()
-        .filter(|spelling| item.get(spelling).is_some())
+        .next()
+        .unwrap_or_else(|| new_target_spelling(target));
+    let document_list = toml_doc
+        .get_or_insert_toml_array_mut(&as_strs(parents), &list_key)
+        .into_diagnostic()?;
+    match edit {
+        ListEdit::Prepend => {
+            if let Some(element) = list.get(0) {
+                insert_array_element(document_list, 0, element.clone());
+            }
+        }
+        ListEdit::Append => {
+            if let Some(element) = list.iter().last() {
+                push_array_element(document_list, element.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writes `entry` at `target` below `parents`, replacing every other spelling
+/// of `target` so that exactly one remains.
+fn write_entry(
+    toml_doc: &mut TomlDocument,
+    parents: &[String],
+    target: &KeySegment,
+    entry: &Item,
+) -> miette::Result<()> {
+    let target_table = nested_item_mut(toml_doc, parents)?;
+    let spellings = spellings_in(target_table, target);
+    let target_key =
+        reusable_spelling(&spellings, target).unwrap_or_else(|| new_target_spelling(target));
+    for spelling in spellings.iter().filter(|spelling| **spelling != target_key) {
+        remove_entry(target_table, spelling).into_diagnostic()?;
+    }
+    insert_entry(target_table, &target_key, entry)
+}
+
+fn insert_entry(table: &mut Item, key: &str, entry: &Item) -> miette::Result<()> {
+    if let Some(value) = entry.as_value() {
+        upsert_entry(table, key, value.clone()).into_diagnostic()?;
+    } else if let Some(entry_table) = entry.as_table()
+        && let Some(table_like) = table.as_table_like_mut()
+    {
+        table_like.insert(key, Item::Table(entry_table.clone()));
+    }
+    Ok(())
+}
+
+/// The spelling already in the document that an entry may keep. A consent
+/// origin keeps only a spelling without credentials.
+fn reusable_spelling(spellings: &[String], target: &KeySegment) -> Option<String> {
+    match target {
+        KeySegment::ConsentOrigin(origin) => spellings
+            .iter()
+            .find(|spelling| channel_url(spelling).is_some_and(|channel| channel == *origin))
+            .cloned(),
+        KeySegment::Name(name) => spellings
+            .iter()
+            .find(|spelling| Some(spelling.as_str()) != legacy_alias(name).as_deref())
+            .cloned(),
+        KeySegment::AzureEndpoint(_) => spellings.first().cloned(),
+    }
+}
+
+fn nested_item_mut<'a>(
+    toml_doc: &'a mut TomlDocument,
+    parents: &[String],
+) -> miette::Result<&'a mut Item> {
+    if parents.is_empty() {
+        return Ok(toml_doc.as_item_mut());
+    }
+    toml_doc
+        .get_or_insert_nested_item(&as_strs(parents))
+        .into_diagnostic()
+}
+
+fn as_strs(strings: &[String]) -> Vec<&str> {
+    strings.iter().map(String::as_str).collect()
+}
+
+/// The keys of `item` that spell `segment`, the preferred spelling first.
+fn spellings_in(item: &Item, segment: &KeySegment) -> Vec<String> {
+    let written = item
+        .as_table_like()
+        .into_iter()
+        .flat_map(|table| table.iter())
+        .map(|(key, _)| key)
+        .collect_vec();
+    spellings_among(&written, segment)
+}
+
+/// The keys of `written` that spell `segment`, the preferred spelling first.
+fn spellings_among(written: &[&str], segment: &KeySegment) -> Vec<String> {
+    match segment {
+        KeySegment::Name(name) => key_spellings(name)
+            .into_iter()
+            .filter(|spelling| written.contains(&spelling.as_str()))
+            .collect(),
+        KeySegment::AzureEndpoint(endpoint) => written_matching(written, |key| {
+            AzureEndpointKey::parse(key).is_ok_and(|key| key == *endpoint)
+        }),
+        KeySegment::ConsentOrigin(origin) => written_matching(written, |key| {
+            channel_url(key).is_some_and(|channel| pixi_config::consent_origin(&channel) == *origin)
+        }),
+    }
+}
+
+fn written_matching(written: &[&str], matches: impl Fn(&str) -> bool) -> Vec<String> {
+    written
+        .iter()
+        .filter(|key| matches(key))
+        .map(|key| key.to_string())
         .collect()
 }
 
-/// Looks `segment` up in `item` under any of its spellings.
-fn get_any_spelling<'a>(item: &'a Item, segment: &str) -> Option<&'a Item> {
-    key_spellings(segment)
-        .iter()
-        .find_map(|spelling| item.get(spelling))
+fn channel_url(written: &str) -> Option<ChannelUrl> {
+    url::Url::parse(written)
+        .ok()
+        .filter(|url| !url.cannot_be_a_base())
+        .map(ChannelUrl::from)
 }
 
 /// The spellings a key segment may have in a configuration file: as given,
@@ -878,26 +1032,42 @@ fn key_spellings(segment: &str) -> Vec<String> {
     let mut spellings = vec![segment.to_string()];
     spellings.extend(legacy_alias(segment));
     spellings.extend(canonical_channel_url(segment));
-    if let Ok(url) = url::Url::parse(segment)
-        && !url.cannot_be_a_base()
-    {
-        let channel = ChannelUrl::from(url);
-        spellings.push(format!("{}/", channel.as_str().trim_end_matches('/')));
-    }
+    spellings.extend(slashed_channel_url(segment));
     spellings
 }
 
 /// The spelling the configuration serializes a channel URL segment with,
 /// when it differs from `segment`.
 fn canonical_channel_url(segment: &str) -> Option<String> {
-    let url = url::Url::parse(segment)
-        .ok()
-        .filter(|url| !url.cannot_be_a_base())?;
-    let canonical = rattler_conda_types::ChannelUrl::from(url)
+    let canonical = channel_url(segment)?
         .as_str()
         .trim_end_matches('/')
         .to_string();
     (canonical != segment).then_some(canonical)
+}
+
+fn slashed_channel_url(segment: &str) -> Option<String> {
+    let channel = channel_url(segment)?;
+    Some(format!("{}/", channel.as_str().trim_end_matches('/')))
+}
+
+/// The spelling a new parent table takes for `segment`.
+fn new_parent_spelling(segment: &KeySegment) -> String {
+    match segment {
+        KeySegment::Name(name) => canonical_channel_url(name)
+            .and_then(|_| slashed_channel_url(name))
+            .unwrap_or_else(|| name.clone()),
+        KeySegment::AzureEndpoint(_) | KeySegment::ConsentOrigin(_) => new_target_spelling(segment),
+    }
+}
+
+/// The spelling a new entry takes for `segment`.
+fn new_target_spelling(segment: &KeySegment) -> String {
+    match segment {
+        KeySegment::Name(name) => canonical_channel_url(name).unwrap_or_else(|| name.clone()),
+        KeySegment::AzureEndpoint(endpoint) => endpoint.to_string(),
+        KeySegment::ConsentOrigin(origin) => origin.as_str().trim_end_matches('/').to_string(),
+    }
 }
 
 /// Returns the legacy `snake_case` alias for a canonical `kebab-case` key or parent table
@@ -916,32 +1086,27 @@ fn legacy_alias(key: &str) -> Option<String> {
     }
 }
 
-/// Resolve parent key paths against the TOML document, using existing snake_case aliases on disk if present.
-fn resolve_parent_keys(doc: &TomlDocument, parents: &[&str]) -> Vec<String> {
-    let mut resolved = Vec::with_capacity(parents.len());
+/// Resolve parent key paths against the TOML document, taking the spelling
+/// already on disk when there is one.
+fn resolve_parent_keys(doc: &TomlDocument, parents: &[KeySegment]) -> Vec<String> {
     let mut current_item = doc.as_item();
-
-    for &parent in parents {
-        let spellings = key_spellings(parent);
-        let present = spellings
-            .iter()
-            .find(|spelling| current_item.get(spelling).is_some());
-        // A new table takes the spelling the configuration serializes.
-        let chosen = present
-            .or_else(|| canonical_channel_url(parent).map(|_| &spellings[spellings.len() - 1]))
-            .cloned()
-            .unwrap_or_else(|| parent.to_string());
-        current_item = current_item.get(&chosen).unwrap_or(&toml_edit::Item::None);
-        resolved.push(chosen);
-    }
-
-    resolved
+    parents
+        .iter()
+        .map(|parent| {
+            let chosen = spellings_in(current_item, parent)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| new_parent_spelling(parent));
+            current_item = current_item.get(&chosen).unwrap_or(&Item::None);
+            chosen
+        })
+        .collect()
 }
 
 /// Extract the selected value, wrapped in its parent tables.
 fn partial_config(config: &Config, key: &str) -> miette::Result<JsonValue> {
-    let key_path = KeyPath::parse(key)?;
-    if !is_known_key(config.get_keys(), &key_path) {
+    let path = ConfigKey::parse(key)?.path();
+    if !is_known_key(config.get_keys(), &path) {
         return Err(miette::miette!(
             "unknown key: {}\nSupported keys:\n\t{}",
             console::style(key).red(),
@@ -950,55 +1115,41 @@ fn partial_config(config: &Config, key: &str) -> miette::Result<JsonValue> {
     }
 
     // TOML omits unset fields instead of serializing them as null.
-    let mut value: JsonValue =
+    let value: JsonValue =
         toml_edit::de::from_str(&toml_edit::ser::to_string(config).into_diagnostic()?)
             .into_diagnostic()?;
-    let consent_origin = key_path.consent_origin();
-    let lookup_target = consent_origin
-        .as_ref()
-        .map(ChannelUrl::as_str)
-        .unwrap_or_else(|| key_path.target());
-    for segment in key_path
-        .parent_keys
-        .iter()
-        .map(String::as_str)
-        .chain(once(lookup_target))
-    {
-        let spelling = key_spellings(segment)
-            .into_iter()
-            .find(|spelling| value.get(spelling).is_some());
-        match spelling.as_deref().and_then(|key| value.get_mut(key)) {
-            Some(child) => value = child.take(),
-            None => return Ok(JsonValue::Object(Default::default())),
-        }
-    }
+    Ok(select_json(value, &path).unwrap_or_else(|| JsonValue::Object(Default::default())))
+}
 
-    Ok(key_path
-        .parent_keys
-        .iter()
-        .map(String::as_str)
-        .chain(once(key_path.target()))
-        .rev()
-        .fold(value, |value, segment| {
-            JsonValue::Object([(segment.to_string(), value)].into_iter().collect())
-        }))
+/// The entry of `value` at `path`, wrapped in its parent tables as `value`
+/// spells them.
+fn select_json(mut value: JsonValue, path: &ConfigPath) -> Option<JsonValue> {
+    let mut spelled = Vec::new();
+    for segment in path.segments() {
+        let written = value
+            .as_object()
+            .into_iter()
+            .flat_map(|object| object.keys())
+            .map(String::as_str)
+            .collect_vec();
+        let spelling = spellings_among(&written, segment).into_iter().next()?;
+        value = value.get_mut(&spelling)?.take();
+        spelled.push(spelling);
+    }
+    Some(spelled.into_iter().rev().fold(value, |value, spelling| {
+        JsonValue::Object([(spelling, value)].into_iter().collect())
+    }))
 }
 
 /// Match supported keys, with each `<...>` placeholder matching one segment.
-fn is_known_key(known_keys: &[&str], key_path: &KeyPath) -> bool {
+fn is_known_key(known_keys: &[&str], path: &ConfigPath) -> bool {
     known_keys.iter().any(|known| {
-        let mut known_segments = known.split('.');
-        let matches = key_path
-            .parent_keys
-            .iter()
-            .map(String::as_str)
-            .chain(once(key_path.target()))
-            .all(|segment| {
-                known_segments
-                    .next()
-                    .is_some_and(|known| known.starts_with('<') || known == segment)
-            });
-        matches && known_segments.next().is_none()
+        let known_segments = known.split('.').collect_vec();
+        known_segments.len() == path.segments().count()
+            && known_segments
+                .iter()
+                .zip(path.segments())
+                .all(|(known, segment)| known.starts_with('<') || segment.as_name() == Some(known))
     })
 }
 
@@ -1283,7 +1434,7 @@ mod tests {
             partial_config(&config, typed).unwrap(),
             serde_json::json!({
                 "virtual-package-detectors": {
-                    "consent": {"https://prefix.dev/conda-forge/": "allow"}
+                    "consent": {"https://prefix.dev/conda-forge": "allow"}
                 }
             })
         );
@@ -2413,6 +2564,289 @@ region = "us-east-1"
         );
     }
 
+    async fn set_keys(keys: &[(&str, &str)]) -> String {
+        let context = TestContext::setup(None);
+        for (key, value) in keys {
+            alter_config(
+                &context.common_args,
+                key,
+                Some(value.to_string()),
+                AlterMode::Set,
+            )
+            .await
+            .unwrap();
+        }
+        context.read_config()
+    }
+
+    #[tokio::test]
+    async fn set_azure_options_with_unquoted_and_quoted_endpoint() {
+        let unquoted = set_keys(&[
+            (
+                "azure-options.mycompany.blob.core.windows.net.auth.releases",
+                "true",
+            ),
+            (
+                "azure-options.mycompany.blob.core.windows.net.scheme",
+                "http",
+            ),
+        ])
+        .await;
+        let quoted = set_keys(&[
+            (
+                "azure-options.\"mycompany.blob.core.windows.net\".auth.releases",
+                "true",
+            ),
+            (
+                "azure-options.\"mycompany.blob.core.windows.net\".scheme",
+                "http",
+            ),
+        ])
+        .await;
+
+        assert_eq!(unquoted, quoted);
+        insta::assert_snapshot!(unquoted, @r#"
+        [azure-options."mycompany.blob.core.windows.net"]
+        scheme = "http"
+        [azure-options."mycompany.blob.core.windows.net".auth]
+        releases = true
+        "#);
+    }
+
+    #[tokio::test]
+    async fn set_whole_azure_entry_with_unquoted_and_quoted_endpoint() {
+        let entry = r#"{"auth": {"releases": true}}"#;
+        let unquoted = set_keys(&[("azure-options.mycompany.blob.core.windows.net", entry)]).await;
+        let quoted =
+            set_keys(&[("azure-options.\"mycompany.blob.core.windows.net\"", entry)]).await;
+
+        assert_eq!(unquoted, quoted);
+        insta::assert_snapshot!(unquoted, @r#"
+        [azure-options]
+        "mycompany.blob.core.windows.net" = { scheme = "https", auth = { releases = true } }
+        "#);
+    }
+
+    #[tokio::test]
+    async fn set_s3_options_with_unquoted_and_quoted_dotted_bucket() {
+        let options = r#"{"endpoint-url": "http://localhost:9000", "region": "auto", "addressing-style": "path"}"#;
+        let unquoted = set_keys(&[
+            ("s3-options.my.bucket", options),
+            ("s3-options.my.bucket.region", "eu-west-1"),
+        ])
+        .await;
+        let quoted = set_keys(&[
+            ("s3-options.\"my.bucket\"", options),
+            ("s3-options.\"my.bucket\".region", "eu-west-1"),
+        ])
+        .await;
+
+        assert_eq!(unquoted, quoted);
+        insta::assert_snapshot!(unquoted, @r#"
+        [s3-options]
+        "my.bucket" = { endpoint-url = "http://localhost:9000/", region = "eu-west-1", addressing-style = "path" }
+        "#);
+    }
+
+    #[tokio::test]
+    async fn set_s3_field_on_undefined_bucket_fails() {
+        let context = TestContext::setup(None);
+
+        let err = alter_config(
+            &context.common_args,
+            "s3-options.missing.region",
+            Some("eu-west-1".to_string()),
+            AlterMode::Set,
+        )
+        .await
+        .unwrap_err();
+
+        insta::assert_snapshot!(err, @"s3 bucket `missing` is not defined in this file; set `s3-options.missing` to its full JSON first");
+        insta::assert_snapshot!(context.read_config(), @"");
+    }
+
+    #[tokio::test]
+    async fn set_default_value_on_empty_file_succeeds() {
+        let written =
+            set_keys(&[("default-channels", "[]"), ("concurrency.downloads", "50")]).await;
+
+        insta::assert_snapshot!(written, @"");
+    }
+
+    #[tokio::test]
+    async fn set_and_pend_quoted_default_channels() {
+        let context = TestContext::setup(None);
+        let key = "\"default-channels\"";
+        for (value, mode) in [
+            ("[\"conda-forge\"]", AlterMode::Set),
+            ("bioconda", AlterMode::Append),
+            ("pytorch", AlterMode::Prepend),
+        ] {
+            alter_config(&context.common_args, key, Some(value.to_string()), mode)
+                .await
+                .unwrap();
+        }
+
+        insta::assert_snapshot!(context.read_config(), @r#"default-channels = ["pytorch", "conda-forge", "bioconda"]"#);
+    }
+
+    async fn alter_file(original: &str, key: &str, value: Option<&str>, mode: AlterMode) -> String {
+        let context = TestContext::setup(Some(original));
+        alter_config(&context.common_args, key, value.map(str::to_string), mode)
+            .await
+            .unwrap();
+        context.read_config()
+    }
+
+    #[tokio::test]
+    async fn set_azure_grant_under_non_canonical_endpoint_spelling() {
+        for spelling in [
+            "mycompany.blob.core.windows.net.",
+            "MyCompany.Blob.Core.Windows.Net",
+        ] {
+            let original = format!("[azure-options.\"{spelling}\".auth]\nreleases = true\n");
+            let key = format!("azure-options.\"{spelling}\".auth.releases");
+            let revoked = alter_file(&original, &key, Some("false"), AlterMode::Set).await;
+            assert_eq!(
+                revoked,
+                format!("[azure-options.\"{spelling}\".auth]\nreleases = false\n")
+            );
+
+            let unset = alter_file(
+                &original,
+                "azure-options.mycompany.blob.core.windows.net.auth.releases",
+                None,
+                AlterMode::Unset,
+            )
+            .await;
+            assert_eq!(unset, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn set_azure_entry_replaces_non_canonical_endpoint_spelling() {
+        let written = alter_file(
+            "[azure-options.\"mycompany.blob.core.windows.net.\".auth]\nreleases = true\n",
+            "azure-options.mycompany.blob.core.windows.net",
+            Some(r#"{"auth": {"staging": true}}"#),
+            AlterMode::Set,
+        )
+        .await;
+
+        insta::assert_snapshot!(written, @r#"
+        [azure-options]
+        "mycompany.blob.core.windows.net." = { scheme = "https", auth = { staging = true } }
+        "#);
+    }
+
+    #[tokio::test]
+    async fn set_azure_containers_named_like_fields() {
+        let scheme = set_keys(&[(
+            "azure-options.mycompany.blob.core.windows.net.auth.scheme",
+            "true",
+        )])
+        .await;
+        insta::assert_snapshot!(scheme, @r#"
+        [azure-options."mycompany.blob.core.windows.net".auth]
+        scheme = true
+        "#);
+
+        let auth = set_keys(&[(
+            "azure-options.mycompany.blob.core.windows.net.auth.auth",
+            "true",
+        )])
+        .await;
+        insta::assert_snapshot!(auth, @r#"
+        [azure-options."mycompany.blob.core.windows.net".auth]
+        auth = true
+        "#);
+    }
+
+    #[tokio::test]
+    async fn unset_azure_auth_table_with_unquoted_endpoint() {
+        let original = concat!(
+            "[azure-options.\"mycompany.blob.core.windows.net\"]\n",
+            "scheme = \"http\"\n",
+            "[azure-options.\"mycompany.blob.core.windows.net\".auth]\n",
+            "releases = true\n",
+        );
+        let written = alter_file(
+            original,
+            "azure-options.mycompany.blob.core.windows.net.auth",
+            None,
+            AlterMode::Unset,
+        )
+        .await;
+
+        insta::assert_snapshot!(written, @r#"
+        [azure-options."mycompany.blob.core.windows.net"]
+        scheme = "http"
+        "#);
+    }
+
+    #[tokio::test]
+    async fn unset_invalid_azure_endpoint() {
+        let written = alter_file(
+            "[azure-options.not-an-endpoint.auth]\nreleases = true\n",
+            "azure-options.not-an-endpoint",
+            None,
+            AlterMode::Unset,
+        )
+        .await;
+
+        insta::assert_snapshot!(written, @"");
+    }
+
+    #[tokio::test]
+    async fn set_and_unset_s3_bucket_named_like_a_field() {
+        let options = r#"{"endpoint-url": "http://localhost:9000", "region": "auto"}"#;
+        let written = set_keys(&[("s3-options.\"region\"", options)]).await;
+        insta::assert_snapshot!(written, @r#"
+        [s3-options]
+        region = { endpoint-url = "http://localhost:9000/", region = "auto", addressing-style = "virtual-host" }
+        "#);
+
+        let unset = alter_file(&written, "s3-options.region", None, AlterMode::Unset).await;
+        insta::assert_snapshot!(unset, @"");
+    }
+
+    #[tokio::test]
+    async fn set_omitted_value_removes_existing_entry() {
+        let context = TestContext::setup(Some("default-channels = [\"conda-forge\"]\n"));
+
+        alter_config(
+            &context.common_args,
+            "default-channels",
+            Some("[]".to_string()),
+            AlterMode::Set,
+        )
+        .await
+        .unwrap();
+
+        insta::assert_snapshot!(context.read_config(), @"");
+    }
+
+    #[tokio::test]
+    async fn unset_azure_grant_with_unquoted_endpoint() {
+        let context = TestContext::setup(Some(
+            "[azure-options.\"mycompany.blob.core.windows.net\".auth]\nreleases = true\nstaging = true\n",
+        ));
+
+        alter_config(
+            &context.common_args,
+            "azure-options.mycompany.blob.core.windows.net.auth.releases",
+            None,
+            AlterMode::Unset,
+        )
+        .await
+        .unwrap();
+
+        insta::assert_snapshot!(context.read_config(), @r#"
+        [azure-options."mycompany.blob.core.windows.net".auth]
+        staging = true
+        "#);
+    }
+
     #[tokio::test]
     async fn list_accepts_every_supported_key() {
         let test_context = TestContext::setup(None);
@@ -2543,12 +2977,57 @@ timeout-seconds = 7
                 .unwrap(),
             serde_json::json!({})
         );
-        for key in [
-            "not-a-key",
-            "offline.nested",
-            "s3-options.missing.not-a-field",
-        ] {
+        assert_eq!(
+            partial_config(&config, "s3-options.missing.not-a-field").unwrap(),
+            serde_json::json!({})
+        );
+        for key in ["not-a-key", "offline.nested"] {
             assert!(partial_config(&config, key).is_err(), "{key}");
         }
+    }
+
+    #[test]
+    fn test_partial_config_with_unquoted_dotted_keys() {
+        let (config, _) = Config::from_toml(
+            r#"
+[azure-options."mycompany.blob.core.windows.net".auth]
+releases = true
+
+[s3-options."my.bucket"]
+endpoint-url = "https://s3.example.com"
+region = "eu-west-1"
+"#,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            partial_config(&config, "azure-options.mycompany.blob.core.windows.net").unwrap(),
+            serde_json::json!({"azure-options": {"mycompany.blob.core.windows.net": {
+                "scheme": "https",
+                "auth": {"releases": true}
+            }}})
+        );
+        assert_eq!(
+            partial_config(
+                &config,
+                "azure-options.MyCompany.blob.core.windows.net.auth.releases"
+            )
+            .unwrap(),
+            serde_json::json!({"azure-options": {"mycompany.blob.core.windows.net": {
+                "auth": {"releases": true}
+            }}})
+        );
+        assert_eq!(
+            partial_config(&config, "s3-options.my.bucket.region").unwrap(),
+            serde_json::json!({"s3-options": {"my.bucket": {"region": "eu-west-1"}}})
+        );
+        assert_eq!(
+            partial_config(&config, "s3-options.my.bucket").unwrap(),
+            serde_json::json!({"s3-options": {"my.bucket": {
+                "endpoint-url": "https://s3.example.com/",
+                "region": "eu-west-1",
+                "addressing-style": "virtual-host"
+            }}})
+        );
     }
 }
